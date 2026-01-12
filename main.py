@@ -4,11 +4,11 @@ import shutil
 from typing import List, Dict
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from collections import defaultdict
 import pypdfium2 as pdf
 
 app = FastAPI()
 
-# Разрешаем Lovable подключаться к API
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -55,14 +55,15 @@ async def analyze_pdf(file: UploadFile = File(...)):
                         continue
                     
                     amount = clean_amount(m.group("amount"))
-                    if amount < 0: # Нам нужны только расходы
+                    if amount < 0:
                         txs.append({
+                            "date": m.group("date"), # СОХРАНЯЕМ ДАТУ
                             "name": detail.replace("Kaspi Gold", "").strip(),
                             "amount": abs(amount)
                         })
             page.close()
 
-        # Группировка по контрагентам
+        # 1. Группировка по контрагентам (для карточек)
         merchants = {}
         for tx in txs:
             name = tx["name"]
@@ -70,8 +71,22 @@ async def analyze_pdf(file: UploadFile = File(...)):
                 merchants[name] = {"name": name, "total": 0, "count": 0}
             merchants[name]["total"] += tx["amount"]
             merchants[name]["count"] += 1
-            
-        return sorted(list(merchants.values()), key=lambda x: x["total"], reverse=True)
+        
+        sorted_merchants = sorted(list(merchants.values()), key=lambda x: x["total"], reverse=True)
+
+        # 2. Группировка по дням (для графика)
+        daily_stats = defaultdict(float)
+        for tx in txs:
+            daily_stats[tx["date"]] += tx["amount"]
+        
+        # Сортируем по дате, чтобы график шел хронологически
+        sorted_daily = [{"date": d, "amount": round(a, 2)} for d, a in sorted(daily_stats.items())]
+
+        # Возвращаем объект с двумя списками
+        return {
+            "merchants": sorted_merchants,
+            "daily": sorted_daily
+        }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

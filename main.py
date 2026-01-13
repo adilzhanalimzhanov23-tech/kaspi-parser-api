@@ -57,20 +57,29 @@ async def analyze_pdf(file: UploadFile = File(...)):
                     amount = clean_amount(m.group("amount"))
                     if amount < 0:
                         txs.append({
-                            "date": m.group("date"), # СОХРАНЯЕМ ДАТУ
+                            "date": m.group("date"),
                             "name": detail.replace("Kaspi Gold", "").strip(),
                             "amount": abs(amount)
                         })
             page.close()
 
-        # 1. Группировка по контрагентам (для карточек)
+        # 1. Группировка по контрагентам С ТРАНЗАКЦИЯМИ
         merchants = {}
         for tx in txs:
             name = tx["name"]
             if name not in merchants:
-                merchants[name] = {"name": name, "total": 0, "count": 0}
+                merchants[name] = {
+                    "name": name, 
+                    "total": 0, 
+                    "count": 0,
+                    "transactions": []  # <-- ДОБАВЛЯЕМ МАССИВ ТРАНЗАКЦИЙ
+                }
             merchants[name]["total"] += tx["amount"]
             merchants[name]["count"] += 1
+            merchants[name]["transactions"].append({
+                "date": tx["date"],
+                "amount": tx["amount"]
+            })
         
         sorted_merchants = sorted(list(merchants.values()), key=lambda x: x["total"], reverse=True)
 
@@ -79,22 +88,18 @@ async def analyze_pdf(file: UploadFile = File(...)):
         for tx in txs:
             daily_stats[tx["date"]] += tx["amount"]
         
-        # Сортируем по дате, чтобы график шел хронологически
         sorted_daily = [{"date": d, "amount": round(a, 2)} for d, a in sorted(daily_stats.items())]
 
-        # Возвращаем объект с двумя списками
         return {
             "merchants": sorted_merchants,
             "daily": sorted_daily
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(error))
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+
 

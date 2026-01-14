@@ -1,8 +1,8 @@
 import re
 import os
 import shutil
-from typing import List, Dict
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from typing import List, Dict, Optional
+from fastapi import FastAPI, UploadFile, File, HTTPException, Header  # <-- Добавил Header
 from fastapi.middleware.cors import CORSMiddleware
 from collections import defaultdict
 import pypdfium2 as pdf
@@ -15,6 +15,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Считываем секрет из настроек Render
+API_KEY_SECRET = os.getenv("MY_PARSER_SECRET", "fallback-secret-key")
 
 IGNORE_PATTERNS = [
     "С Kaspi Депозита", "На Kaspi Депозит", "На Kaspi депозит",
@@ -34,7 +37,14 @@ def clean_amount(a: str) -> float:
     return float(a)
 
 @app.post("/analyze")
-async def analyze_pdf(file: UploadFile = File(...)):
+async def analyze_pdf(
+    file: UploadFile = File(...),
+    x_api_key: Optional[str] = Header(None)  # <-- Ожидаем ключ в заголовке
+):
+    # ПРОВЕРКА КЛЮЧА
+    if x_api_key != API_KEY_SECRET:
+        raise HTTPException(status_code=403, detail="Forbidden: Invalid API Key")
+
     temp_path = f"temp_{file.filename}"
     with open(temp_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
@@ -63,7 +73,7 @@ async def analyze_pdf(file: UploadFile = File(...)):
                         })
             page.close()
 
-        # 1. Группировка по контрагентам С ТРАНЗАКЦИЯМИ
+        # 1. Группировка по контрагентам
         merchants = {}
         for tx in txs:
             name = tx["name"]
@@ -72,7 +82,7 @@ async def analyze_pdf(file: UploadFile = File(...)):
                     "name": name, 
                     "total": 0, 
                     "count": 0,
-                    "transactions": []  # <-- ДОБАВЛЯЕМ МАССИВ ТРАНЗАКЦИЙ
+                    "transactions": []
                 }
             merchants[name]["total"] += tx["amount"]
             merchants[name]["count"] += 1
@@ -83,7 +93,7 @@ async def analyze_pdf(file: UploadFile = File(...)):
         
         sorted_merchants = sorted(list(merchants.values()), key=lambda x: x["total"], reverse=True)
 
-        # 2. Группировка по дням (для графика)
+        # 2. Группировка по дням
         daily_stats = defaultdict(float)
         for tx in txs:
             daily_stats[tx["date"]] += tx["amount"]
@@ -96,10 +106,16 @@ async def analyze_pdf(file: UploadFile = File(...)):
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(error))
+        # Исправил error на e
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
 
 
 

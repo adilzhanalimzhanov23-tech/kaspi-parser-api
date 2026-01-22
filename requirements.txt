@@ -2,4 +2,5 @@ fastapi
 uvicorn
 pypdfium2
 python-multipart
+openai
 

@@ -2,7 +2,7 @@ import re
 import os
 import shutil
 import logging
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional, List, Dict
 
 import pypdfium2 as pdf
@@ -10,7 +10,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 
 # =========================
-# APP
+# НАСТРОЙКИ ПРИЛОЖЕНИЯ
 # =========================
 
 app = FastAPI()
@@ -24,165 +24,158 @@ app.add_middleware(
 
 API_KEY_SECRET = os.getenv("MY_PARSER_SECRET", "fallback-secret-key")
 
-# =========================
-# LOGGING
-# =========================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger("bank_pdf_parser")
 
 # =========================
-# REGEX & CONSTANTS
+# РЕГУЛЯРНЫЕ ВЫРАЖЕНИЯ (FORTE & KASPI)
 # =========================
 
+# Игнорируем технические строки и доходы
 IGNORE_PATTERNS = [
     re.compile(p, re.IGNORECASE) for p in [
-        "пополнение",
-        "перевод самому себе",
-        "депозит",
-        "kaspi депозит",
-        "гкп",
-        "акимат",
-        "со своего счета",
-        "на свой счет",
+        "пополнение", "перевод самому себе", "депозит", 
+        "со своего счета", "на свой счет", "вознаграждение"
     ]
 ]
 
-KASPI_LINE_RE = re.compile(
-    r"(?P<date>\d{2}\.\d{2}\.\d{4})\s+"
-    r"(?P<amount>-?\d[\d\s,.]*)\s*[₸T]\s+"
-    r"(?P<operation>Покупка|Перевод|Платеж|Другое)\s+"
-    r"(?P<detail>.+)"
+# Универсальный поиск даты: DD.MM.YY или DD.MM.YYYY
+DATE_RE = re.compile(r"(\d{2}\.\d{2}\.\d{2,4})")
+
+# Поиск суммы: ловит форматы "-1 500.00", "1500,00", "- 500"
+# Обязательно ищет привязку к валюте ₸, T, KZT или "тенге"
+AMOUNT_WITH_CURRENCY_RE = re.compile(
+    r"(?P<amount>-?\s?\d[\d\s,.]*)\s*(?:₸|T|KZT|тенге)", 
+    re.IGNORECASE
 )
 
-DATE_RE = re.compile(r"\d{2}\.\d{2}\.\d{4}")
-AMOUNT_RE = re.compile(r"-?\d[\d\s,.]+")
-MCC_RE = re.compile(r"\bMCC[:\s]?(?P<mcc>\d{4})\b")
+# Поиск MCC: 4 цифры подряд
+MCC_RE = re.compile(r"\b(?P<mcc>\d{4})\b")
 
 # =========================
-# HELPERS
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # =========================
 
-def clean_amount(val: str) -> Decimal:
+def clean_amount(val_str: str) -> Decimal:
+    """Превращает 'грязную' строку суммы в чистое число Decimal."""
     try:
-        return Decimal(
-            val.replace(" ", "")
-               .replace("\u00a0", "")
-               .replace(",", ".")
-               .replace("₸", "")
-               .replace("KZT", "")
-               .strip()
-        )
-    except InvalidOperation:
-        raise ValueError(f"Invalid amount value: {val}")
-
-
-def should_ignore(text: str) -> bool:
-    return any(p.search(text) for p in IGNORE_PATTERNS)
-
+        # Убираем всё, кроме цифр, точки, запятой и минуса
+        cleaned = re.sub(r"[^\d,.-]", "", val_str)
+        # Заменяем запятую на точку для стандарта Decimal
+        if "," in cleaned and "." in cleaned:
+            cleaned = cleaned.replace(",", "") # для формата 1,200.50
+        else:
+            cleaned = cleaned.replace(",", ".") # для формата 1200,50
+        
+        return Decimal(cleaned)
+    except Exception:
+        return Decimal("0")
 
 def parse_line(line: str) -> Optional[Dict]:
-    # ---------- Kaspi classic ----------
-    m = KASPI_LINE_RE.search(line)
-    if m:
-        amount = clean_amount(m.group("amount"))
-        if amount >= 0:
+    """Разбирает одну строку текста из выписки."""
+    
+    # 1. Ищем дату. Нет даты — нет транзакции.
+    date_match = DATE_RE.search(line)
+    if not date_match:
+        return None
+
+    # 2. Ищем сумму с валютой (основной признак транзакции в Forte/Kaspi)
+    amount_match = AMOUNT_WITH_CURRENCY_RE.search(line)
+    if not amount_match:
+        return None
+
+    try:
+        raw_amount = amount_match.group("amount")
+        amount_dec = clean_amount(raw_amount)
+
+        # Нас интересуют только расходы (отрицательные суммы)
+        if amount_dec >= 0:
             return None
+
+        # 3. Ищем MCC (4 цифры), исключая саму дату
+        mcc = None
+        all_numbers = MCC_RE.findall(line)
+        date_str = date_match.group(1)
+        for num in all_numbers:
+            if num not in date_str:
+                mcc = num
+                break
 
         return {
-            "date": m.group("date"),
-            "amount": abs(amount),
-            "name": m.group("detail").strip(),
-            "mcc": None
-        }
-
-    # ---------- Табличные PDF ----------
-    date = DATE_RE.search(line)
-    amount = AMOUNT_RE.search(line)
-
-    if date and amount:
-        try:
-            value = clean_amount(amount.group())
-        except Exception:
-            return None
-
-        if value >= 0:
-            return None
-
-        mcc = MCC_RE.search(line)
-
-        return {
-            "date": date.group(),
-            "amount": abs(value),
+            "date": date_str,
+            "amount": float(abs(amount_dec)), # Возвращаем положительное число для фронта
             "name": line.strip(),
-            "mcc": mcc.group("mcc") if mcc else None
+            "mcc": mcc
         }
-
-    return None
+    except Exception as e:
+        logger.error(f"Ошибка парсинга строки: {line} -> {e}")
+        return None
 
 # =========================
-# API
+# API ЭНДПОИНТЫ
 # =========================
 
 @app.post("/analyze")
 async def analyze_pdf(
-    file: UploadFile = File(...),
+    file: UploadFile = File(...), 
     x_api_key: Optional[str] = Header(None)
 ):
+    # Проверка ключа доступа
     if x_api_key != API_KEY_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden")
 
     temp_path = f"/tmp/{file.filename}"
-
     with open(temp_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    transactions: List[Dict] = []
-
+    transactions = []
+    
     try:
         doc = pdf.PdfDocument(temp_path)
-
+        
         for page in doc:
-            textpage = page.get_textpage()
-            text = textpage.get_text_range()
-
-            for line in text.splitlines():
+            text_page = page.get_textpage()
+            text_content = text_page.get_text_range()
+            
+            for line in text_content.splitlines():
                 line = line.strip()
                 if not line:
                     continue
 
-                if should_ignore(line):
+                # Пропускаем игнорируемые паттерны
+                if any(p.search(line) for p in IGNORE_PATTERNS):
                     continue
 
                 tx = parse_line(line)
                 if tx:
                     transactions.append(tx)
                 else:
-                    if "₸" in line and DATE_RE.search(line):
-                        logger.warning(f"UNPARSED LINE: {line}")
+                    # Логируем подозрительные строки, которые не распарсились
+                    if any(curr in line for curr in ["₸", "KZT", "T"]):
+                        logger.info(f"ПРОПУЩЕНА СТРОКА: {line}")
 
-        return {
-            "transactions": transactions
-        }
+        if not transactions:
+            logger.error("Транзакции не найдены в файле")
+            raise HTTPException(
+                status_code=422, 
+                detail="Парсер не нашёл транзакций. Проверьте, что это выписка Forte или Kaspi."
+            )
 
+        return {"transactions": transactions}
+
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.exception("PDF parsing failed")
+        logger.exception("Критическая ошибка парсинга")
         raise HTTPException(status_code=500, detail=str(e))
-
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
-# =========================
-# LOCAL RUN
-# =========================
-
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
 
 
 

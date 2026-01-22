@@ -1,16 +1,14 @@
 import re
 import os
 import shutil
-from decimal import Decimal
 from typing import List, Dict, Optional
-import pypdfium2 as pdf
 from fastapi import FastAPI, UploadFile, File, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
+from collections import defaultdict
+import pypdfium2 as pdf
 
-# !!! ВОТ ЭТО ИСКАЛ RENDER !!!
 app = FastAPI()
 
-# Разрешаем фронтенду подключаться
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,101 +16,106 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Считываем секрет из настроек Render
 API_KEY_SECRET = os.getenv("MY_PARSER_SECRET", "fallback-secret-key")
 
-# =========================
-# ТВОИ REGEX (БЕЗ ИЗМЕНЕНИЙ)
-# =========================
-DATE_RE = re.compile(r"\d{2}\.\d{2}\.\d{4}")
-NEG_AMOUNT_RE = re.compile(r"-(\d[\d\s]*\.\d{2})\s*KZT")
-MCC_RE = re.compile(r"MCC[:\s]*([\d\s]+)")
-POPOLNENIE_RE = re.compile(r"Пополнение", re.IGNORECASE)
+IGNORE_PATTERNS = [
+    "С Kaspi Депозита", "На Kaspi Депозит", "На Kaspi депозит",
+    "На свой Счет в Kaspi Pay", "Со своего Счета в Kaspi Pay",
+    "Перевод самому себе", "Пополнение" 
+]
 
-# =========================
-# ТВОИ HELPERS (БЕЗ ИЗМЕНЕНИЙ)
-# =========================
-def clean_amount(val: str) -> Decimal:
-    return Decimal(val.replace(" ", ""))
+LINE_RE = re.compile(
+    r"^(?P<date>\d{2}\.\d{2}\.\d{2,4})\s+"
+    r"(?P<amount>[+-]?\s*\d[\d\s,.]*)\s*[₸T]\s+"
+    r"(?P<operation>[А-Яа-яA-Za-zЁё]+)\s+"
+    r"(?P<detail>.+)$"
+)
 
-def extract_mcc(text: str) -> str | None:
-    m = MCC_RE.search(text)
-    if not m: return None
-    return "".join(re.findall(r"\d", m.group(1)))
+def clean_amount(a: str) -> float:
+    a = a.replace(" ", "").replace(",", ".")
+    return float(a)
 
-def extract_detail_name(detail: str) -> str:
-    return detail.split(",")[0].strip()
-
-# =========================
-# ТВОЙ PARSER (БЕЗ ИЗМЕНЕНИЙ ЛОГИКИ)
-# =========================
-def parse_statement_pdf(path: str) -> List[Dict]:
-    doc = pdf.PdfDocument(path)
-    lines: List[str] = []
-    for page in doc:
-        textpage = page.get_textpage()
-        text = textpage.get_text_range()
-        lines.extend([l.strip() for l in text.splitlines() if l.strip()])
-
-    transactions: List[Dict] = []
-    current = None
-    for line in lines:
-        date_match = DATE_RE.search(line)
-        amount_match = NEG_AMOUNT_RE.search(line)
-        if date_match and amount_match:
-            if current: transactions.append(current)
-            if POPOLNENIE_RE.search(line):
-                current = None
-                continue
-            amount = clean_amount(amount_match.group(1))
-            current = {
-                "date": date_match.group(),
-                "amount": float(amount), # Перевел в float для JSON
-                "name": "Покупка" if "Покупка" in line else "",
-                "detail_name": "",
-                "mcc": None,
-                "_detail_raw": ""
-            }
-            continue
-        if current:
-            current["_detail_raw"] += " " + line
-            mcc = extract_mcc(current["_detail_raw"])
-            if mcc: current["mcc"] = mcc
-            if not current["detail_name"]:
-                current["detail_name"] = extract_detail_name(current["_detail_raw"])
-    if current: transactions.append(current)
-    for tx in transactions:
-        # Для совместимости с твоим прошлым фронтом переименуем detail_name в name
-        final_name = tx["detail_name"] if tx["detail_name"] else tx["name"]
-        tx["name"] = final_name
-        tx.pop("_detail_raw", None)
-        tx.pop("detail_name", None)
-        tx.pop("description", None)
-    return transactions
-
-# =========================
-# ЭНДПОИНТ ДЛЯ RENDER
-# =========================
 @app.post("/analyze")
-async def analyze(file: UploadFile = File(...), x_api_key: Optional[str] = Header(None)):
+async def analyze_pdf(
+    file: UploadFile = File(...),
+    x_api_key: Optional[str] = Header(None)
+):
     if x_api_key != API_KEY_SECRET:
-        raise HTTPException(status_code=403, detail="Forbidden")
-    
-    temp_path = f"/tmp/{file.filename}"
-    with open(temp_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+        raise HTTPException(status_code=403, detail="Forbidden: Invalid API Key")
+
+    temp_path = f"temp_{file.filename}"
+    with open(temp_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
     
     try:
-        data = parse_statement_pdf(temp_path)
-        return {"transactions": data}
+        doc = pdf.PdfDocument(temp_path)
+        txs = []
+        for i in range(len(doc)):
+            page = doc.get_page(i)
+            textpage = page.get_textpage()
+            raw = textpage.get_text_range()
+            for line in raw.split("\n"):
+                line = line.strip()
+                m = LINE_RE.match(line)
+                if m:
+                    detail = m.group("detail")
+                    if any(bad.lower() in detail.lower() for bad in IGNORE_PATTERNS):
+                        continue
+                    
+                    try:
+                        amount = clean_amount(m.group("amount"))
+                        if amount < 0:
+                            txs.append({
+                                "date": m.group("date"),
+                                "name": detail.replace("Kaspi Gold", "").strip(),
+                                "amount": abs(amount)
+                            })
+                    except:
+                        continue
+            page.close()
+
+        # 1. Группировка по контрагентам
+        merchants = {}
+        for tx in txs:
+            name = tx["name"]
+            if name not in merchants:
+                merchants[name] = {
+                    "name": name, 
+                    "total": 0, 
+                    "count": 0,
+                    "transactions": []
+                }
+            merchants[name]["total"] += tx["amount"]
+            merchants[name]["count"] += 1
+            merchants[name]["transactions"].append({
+                "date": tx["date"],
+                "amount": tx["amount"]
+            })
+        
+        sorted_merchants = sorted(list(merchants.values()), key=lambda x: x["total"], reverse=True)
+
+        # 2. Группировка по дням
+        daily_stats = defaultdict(float)
+        for tx in txs:
+            daily_stats[tx["date"]] += tx["amount"]
+        
+        sorted_daily = [{"date": d, "amount": round(a, 2)} for d, a in sorted(daily_stats.items())]
+
+        return {
+            "merchants": sorted_merchants,
+            "daily": sorted_daily
+        }
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        if os.path.exists(temp_path): os.remove(temp_path)
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
-@app.get("/")
-def health_check():
-    return {"status": "working"}
-
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=10000)
 
 
 

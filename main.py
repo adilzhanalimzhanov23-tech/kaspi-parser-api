@@ -21,23 +21,37 @@ app.add_middleware(
 API_KEY_SECRET = os.getenv("MY_PARSER_SECRET", "fallback-secret-key")
 client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# ТВОИ КОНСТАНТЫ ИЗ ОРИГИНАЛА
+# ТВОИ КОНСТАНТЫ ДЛЯ KASPI
 IGNORE_PATTERNS = ["С Kaspi Депозита", "На Kaspi Депозит", "На Kaspi депозит", "На свой Счет в Kaspi Pay", "Со своего Счета в Kaspi Pay", "Перевод самому себе", "Пополнение"]
 LINE_RE = re.compile(r"^(?P<date>\d{2}\.\d{2}\.\d{2})\s+(?P<amount>[+-]?\s*\d[\d\s,]*)\s*₸\s+(?P<operation>[А-Яа-яA-Za-zЁё]+)\s+(?P<detail>.+)$")
 
 def clean_amount(a: str) -> float:
     return float(a.replace(" ", "").replace(",", "."))
 
-# НОВАЯ ФУНКЦИЯ: ИИ-ОБЕРТКА ДЛЯ ОСТАЛЬНЫХ БАНКОВ
+# НОВАЯ УЛУЧШЕННАЯ ФУНКЦИЯ ДЛЯ ДРУГИХ БАНКОВ (Forte, Freedom, Halyk и т.д.)
 async def parse_with_llm(text: str) -> List[Dict]:
-    prompt = f"""Ты экстрактор трат. Извлеки только РАСХОДЫ из этой выписки (Halyk, Freedom, BCC, Alatau, Forte).
-    Верни строго JSON: {{"transactions": [{{"date": "DD.MM.YY", "name": "Контрагент", "amount": 100}}]}}
-    Очищай 'name' от мусора (MCC, референс, коды).
-    Текст: {text[:8000]}""" # Берем первые 8к символов для экономии
+    # Мы просим ИИ не считать суммы, а просто доставать данные и MCC
+    prompt = f"""Ты — робот-экстрактор данных. Извлеки ВСЕ траты из текста выписки.
+    Для каждой транзакции ОБЯЗАТЕЛЬНО найди MCC код (4 цифры), если он указан в детализации (особенно важно для Forte/Freedom).
+    
+    Верни строго JSON: 
+    {{
+      "transactions": [
+        {{"date": "DD.MM.YY", "name": "Название магазина", "amount": 100.0, "mcc": "5411"}}
+      ]
+    }}
+    
+    ПРАВИЛА:
+    1. Не суммируй транзакции. 
+    2. Извлекай каждую операцию отдельно.
+    3. Если MCC нет, поле mcc оставь null.
+    
+    Текст: {text[:10000]}"""
     
     response = client.chat.completions.create(
         model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
+        messages=[{"role": "system", "content": "Ты извлекаешь данные с 100% точностью. Не считаешь суммы сам, только список."},
+                  {"role": "user", "content": prompt}],
         response_format={ "type": "json_object" }
     )
     return json.loads(response.choices[0].message.content).get("transactions", [])
@@ -61,7 +75,7 @@ async def analyze_pdf(file: UploadFile = File(...), x_api_key: Optional[str] = H
             raw = page.get_textpage().get_text_range()
             full_text += raw
             
-            # 1. Сначала пробуем твой код для Kaspi
+            # 1. ТВОЙ ОРИГИНАЛЬНЫЙ КОД ДЛЯ KASPI (Regex)
             for line in raw.split("\n"):
                 m = LINE_RE.match(line.strip())
                 if m:
@@ -69,34 +83,29 @@ async def analyze_pdf(file: UploadFile = File(...), x_api_key: Optional[str] = H
                     if any(bad.lower() in detail.lower() for bad in IGNORE_PATTERNS): continue
                     amount = clean_amount(m.group("amount"))
                     if amount < 0:
-                        txs.append({"date": m.group("date"), "name": detail.replace("Kaspi Gold", "").strip(), "amount": abs(amount)})
+                        # Сохраняем структуру, добавляем поле mcc (в Kaspi его обычно нет в тексте)
+                        txs.append({
+                            "date": m.group("date"), 
+                            "name": detail.replace("Kaspi Gold", "").strip(), 
+                            "amount": abs(amount),
+                            "mcc": None
+                        })
             page.close()
 
-        # 2. Если Kaspi не сработал (txs пусто) — вызываем ИИ для других банков
+        # 2. ЕСЛИ НЕ KASPI (или ничего не нашли) — ВКЛЮЧАЕМ ИИ ДЛЯ FORTE/ДРУГИХ
         if not txs:
             txs = await parse_with_llm(full_text)
 
-        # 3. ТВОЯ УНИВЕРСАЛЬНАЯ ГРУППИРОВКА (теперь работает для всех!)
-        merchants = {}
-        for tx in txs:
-            name = tx["name"]
-            if name not in merchants:
-                merchants[name] = {"name": name, "total": 0, "count": 0, "transactions": []}
-            merchants[name]["total"] += tx["amount"]
-            merchants[name]["count"] += 1
-            merchants[name]["transactions"].append({"date": tx["date"], "amount": tx["amount"]})
-        
-        sorted_merchants = sorted(list(merchants.values()), key=lambda x: x["total"], reverse=True)
-        daily_stats = defaultdict(float)
-        for tx in txs: daily_stats[tx["date"]] += tx["amount"]
-        sorted_daily = [{"date": d, "amount": round(a, 2)} for d, a in sorted(daily_stats.items())]
-
-        return {"merchants": sorted_merchants, "daily": sorted_daily}
+        # 3. ФИНАЛЬНЫЙ ВОЗВРАТ ДАННЫХ
+        # Теперь мы не считаем 'total' здесь, чтобы Lovable сделал это математически точно на фронте.
+        # Мы просто возвращаем чистый список транзакций с MCC-кодами.
+        return {"transactions": txs}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if os.path.exists(temp_path): os.remove(temp_path)
+
 
 
 

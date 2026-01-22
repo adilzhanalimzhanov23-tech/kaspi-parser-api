@@ -1,58 +1,122 @@
-import os, re, json, shutil
+import re
+from decimal import Decimal, InvalidOperation
+from typing import List, Dict
 import pypdfium2 as pdf
-from fastapi import FastAPI, UploadFile, File, Header
-from openai import OpenAI
 
-app = FastAPI()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# 1. Жесткий экстрактор (Код)
-def hard_extract_lines(filepath):
-    lines_with_data = []
-    doc = pdf.PdfDocument(filepath)
+# =========================
+# REGEX
+# =========================
+
+DATE_RE = re.compile(r"\d{2}\.\d{2}\.\d{4}")
+NEG_AMOUNT_RE = re.compile(r"-(\d[\d\s]*\.\d{2})\s*KZT")
+MCC_RE = re.compile(r"MCC[:\s]*([\d\s]+)")
+POPOLNENIE_RE = re.compile(r"Пополнение", re.IGNORECASE)
+
+
+# =========================
+# HELPERS
+# =========================
+
+def clean_amount(val: str) -> Decimal:
+    return Decimal(val.replace(" ", ""))
+
+
+def extract_mcc(text: str) -> str | None:
+    """
+    Извлекает MCC даже если он разорван переносами
+    """
+    m = MCC_RE.search(text)
+    if not m:
+        return None
+    return "".join(re.findall(r"\d", m.group(1)))
+
+
+def extract_detail_name(detail: str) -> str:
+    """
+    Берём всё до первой запятой
+    """
+    return detail.split(",")[0].strip()
+
+
+# =========================
+# MAIN PARSER
+# =========================
+
+def parse_statement_pdf(path: str) -> List[Dict]:
+    doc = pdf.PdfDocument(path)
+    lines: List[str] = []
+
     for page in doc:
-        text = page.get_textpage().get_text_range()
-        for line in text.splitlines():
-            # Если в строке есть дата и символ валюты — это наш кандидат
-            if re.search(r"\d{2}\.\d{2}\.\d{2,4}", line) and any(c in line for c in ["₸", "KZT", "T"]):
-                lines_with_data.append(line.strip())
-    return lines_with_data
+        textpage = page.get_textpage()
+        text = textpage.get_text_range()
+        lines.extend([l.strip() for l in text.splitlines() if l.strip()])
 
-# 2. Умный нормализатор (ИИ)
-def ai_normalize(raw_lines):
-    prompt = f"""Преврати эти строки банковской выписки в JSON. 
-    ОЧЕНЬ ВАЖНО: 
-    - Разделяй Yandex Go: если такси — 'Yandex Taxi', если еда — 'Yandex Eats'.
-    - Сумму бери СТРОГО из текста, только число.
-    - MCC вытаскивай (4 цифры).
-    Строки:
-    {chr(10).join(raw_lines)}
-    
-    Верни JSON: {{"transactions": [{{"date": "...", "amount": 123.0, "name": "...", "mcc": "..."}}]}}"""
-    
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-        response_format={"type": "json_object"}
-    )
-    return json.loads(response.choices[0].message.content).get("transactions", [])
+    transactions: List[Dict] = []
 
-@app.post("/analyze")
-async def analyze(file: UploadFile = File(...)):
-    path = f"/tmp/{file.filename}"
-    with open(path, "wb") as f: f.write(await file.read())
-    
-    try:
-        # Сначала код находит все важные строки
-        raw_data = hard_extract_lines(path)
-        if not raw_data:
-            return {"transactions": []}
-            
-        # Потом ИИ их структурирует
-        final_txs = ai_normalize(raw_data)
-        return {"transactions": final_txs}
-    finally:
-        if os.path.exists(path): os.remove(path)
+    current = None  # текущая собираемая транзакция
+
+    for line in lines:
+        # 1️⃣ новая строка с датой + суммой
+        date_match = DATE_RE.search(line)
+        amount_match = NEG_AMOUNT_RE.search(line)
+
+        if date_match and amount_match:
+            # закрываем предыдущую
+            if current:
+                transactions.append(current)
+
+            # если это пополнение — пропускаем
+            if POPOLNENIE_RE.search(line):
+                current = None
+                continue
+
+            amount = clean_amount(amount_match.group(1))
+
+            current = {
+                "date": date_match.group(),
+                "amount": amount,
+                "description": "Покупка" if "Покупка" in line else "",
+                "detail_name": "",
+                "mcc": None,
+                "_detail_raw": ""
+            }
+            continue
+
+        # 2️⃣ продолжаем детализацию
+        if current:
+            current["_detail_raw"] += " " + line
+
+            # если MCC появился — пробуем вытащить
+            mcc = extract_mcc(current["_detail_raw"])
+            if mcc:
+                current["mcc"] = mcc
+
+            # если имя ещё не заполнено
+            if not current["detail_name"]:
+                current["detail_name"] = extract_detail_name(current["_detail_raw"])
+
+    # закрываем последнюю
+    if current:
+        transactions.append(current)
+
+    # чистим техническое поле
+    for tx in transactions:
+        tx.pop("_detail_raw", None)
+
+    return transactions
+
+
+# =========================
+# EXAMPLE
+# =========================
+
+if __name__ == "__main__":
+    data = parse_statement_pdf("Сформированная выписка (4).pdf")
+    for d in data[:5]:
+        print(d)
+
+
 
 
 

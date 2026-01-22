@@ -1,13 +1,17 @@
 import re
 import os
 import shutil
-import json
-import openai
-from typing import List, Dict, Optional
+import logging
+from decimal import Decimal, InvalidOperation
+from typing import Optional, List, Dict
+
+import pypdfium2 as pdf
 from fastapi import FastAPI, UploadFile, File, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
-from collections import defaultdict
-import pypdfium2 as pdf
+
+# =========================
+# APP
+# =========================
 
 app = FastAPI()
 
@@ -19,92 +23,168 @@ app.add_middleware(
 )
 
 API_KEY_SECRET = os.getenv("MY_PARSER_SECRET", "fallback-secret-key")
-client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# ТВОИ КОНСТАНТЫ ДЛЯ KASPI
-IGNORE_PATTERNS = ["С Kaspi Депозита", "На Kaspi Депозит", "На Kaspi депозит", "На свой Счет в Kaspi Pay", "Со своего Счета в Kaspi Pay", "Перевод самому себе", "Пополнение"]
-LINE_RE = re.compile(r"^(?P<date>\d{2}\.\d{2}\.\d{2})\s+(?P<amount>[+-]?\s*\d[\d\s,]*)\s*₸\s+(?P<operation>[А-Яа-яA-Za-zЁё]+)\s+(?P<detail>.+)$")
+# =========================
+# LOGGING
+# =========================
 
-def clean_amount(a: str) -> float:
-    return float(a.replace(" ", "").replace(",", "."))
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+logger = logging.getLogger("bank_pdf_parser")
 
-# НОВАЯ УЛУЧШЕННАЯ ФУНКЦИЯ ДЛЯ ДРУГИХ БАНКОВ (Forte, Freedom, Halyk и т.д.)
-async def parse_with_llm(text: str) -> List[Dict]:
-    # Мы просим ИИ не считать суммы, а просто доставать данные и MCC
-    prompt = f"""Ты — робот-экстрактор данных. Извлеки ВСЕ траты из текста выписки.
-    Для каждой транзакции ОБЯЗАТЕЛЬНО найди MCC код (4 цифры), если он указан в детализации (особенно важно для Forte/Freedom).
-    
-    Верни строго JSON: 
-    {{
-      "transactions": [
-        {{"date": "DD.MM.YY", "name": "Название магазина", "amount": 100.0, "mcc": "5411"}}
-      ]
-    }}
-    
-    ПРАВИЛА:
-    1. Не суммируй транзакции. 
-    2. Извлекай каждую операцию отдельно.
-    3. Если MCC нет, поле mcc оставь null.
-    
-    Текст: {text[:10000]}"""
-    
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "system", "content": "Ты извлекаешь данные с 100% точностью. Не считаешь суммы сам, только список."},
-                  {"role": "user", "content": prompt}],
-        response_format={ "type": "json_object" }
-    )
-    return json.loads(response.choices[0].message.content).get("transactions", [])
+# =========================
+# REGEX & CONSTANTS
+# =========================
+
+IGNORE_PATTERNS = [
+    re.compile(p, re.IGNORECASE) for p in [
+        "пополнение",
+        "перевод самому себе",
+        "депозит",
+        "kaspi депозит",
+        "гкп",
+        "акимат",
+        "со своего счета",
+        "на свой счет",
+    ]
+]
+
+KASPI_LINE_RE = re.compile(
+    r"(?P<date>\d{2}\.\d{2}\.\d{4})\s+"
+    r"(?P<amount>-?\d[\d\s,.]*)\s*[₸T]\s+"
+    r"(?P<operation>Покупка|Перевод|Платеж|Другое)\s+"
+    r"(?P<detail>.+)"
+)
+
+DATE_RE = re.compile(r"\d{2}\.\d{2}\.\d{4}")
+AMOUNT_RE = re.compile(r"-?\d[\d\s,.]+")
+MCC_RE = re.compile(r"\bMCC[:\s]?(?P<mcc>\d{4})\b")
+
+# =========================
+# HELPERS
+# =========================
+
+def clean_amount(val: str) -> Decimal:
+    try:
+        return Decimal(
+            val.replace(" ", "")
+               .replace("\u00a0", "")
+               .replace(",", ".")
+               .replace("₸", "")
+               .replace("KZT", "")
+               .strip()
+        )
+    except InvalidOperation:
+        raise ValueError(f"Invalid amount value: {val}")
+
+
+def should_ignore(text: str) -> bool:
+    return any(p.search(text) for p in IGNORE_PATTERNS)
+
+
+def parse_line(line: str) -> Optional[Dict]:
+    # ---------- Kaspi classic ----------
+    m = KASPI_LINE_RE.search(line)
+    if m:
+        amount = clean_amount(m.group("amount"))
+        if amount >= 0:
+            return None
+
+        return {
+            "date": m.group("date"),
+            "amount": abs(amount),
+            "name": m.group("detail").strip(),
+            "mcc": None
+        }
+
+    # ---------- Табличные PDF ----------
+    date = DATE_RE.search(line)
+    amount = AMOUNT_RE.search(line)
+
+    if date and amount:
+        try:
+            value = clean_amount(amount.group())
+        except Exception:
+            return None
+
+        if value >= 0:
+            return None
+
+        mcc = MCC_RE.search(line)
+
+        return {
+            "date": date.group(),
+            "amount": abs(value),
+            "name": line.strip(),
+            "mcc": mcc.group("mcc") if mcc else None
+        }
+
+    return None
+
+# =========================
+# API
+# =========================
 
 @app.post("/analyze")
-async def analyze_pdf(file: UploadFile = File(...), x_api_key: Optional[str] = Header(None)):
+async def analyze_pdf(
+    file: UploadFile = File(...),
+    x_api_key: Optional[str] = Header(None)
+):
     if x_api_key != API_KEY_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    temp_path = f"temp_{file.filename}"
+    temp_path = f"/tmp/{file.filename}"
+
     with open(temp_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
-    
+
+    transactions: List[Dict] = []
+
     try:
         doc = pdf.PdfDocument(temp_path)
-        txs = []
-        full_text = ""
 
-        for i in range(len(doc)):
-            page = doc.get_page(i)
-            raw = page.get_textpage().get_text_range()
-            full_text += raw
-            
-            # 1. ТВОЙ ОРИГИНАЛЬНЫЙ КОД ДЛЯ KASPI (Regex)
-            for line in raw.split("\n"):
-                m = LINE_RE.match(line.strip())
-                if m:
-                    detail = m.group("detail")
-                    if any(bad.lower() in detail.lower() for bad in IGNORE_PATTERNS): continue
-                    amount = clean_amount(m.group("amount"))
-                    if amount < 0:
-                        # Сохраняем структуру, добавляем поле mcc (в Kaspi его обычно нет в тексте)
-                        txs.append({
-                            "date": m.group("date"), 
-                            "name": detail.replace("Kaspi Gold", "").strip(), 
-                            "amount": abs(amount),
-                            "mcc": None
-                        })
-            page.close()
+        for page in doc:
+            textpage = page.get_textpage()
+            text = textpage.get_text_range()
 
-        # 2. ЕСЛИ НЕ KASPI (или ничего не нашли) — ВКЛЮЧАЕМ ИИ ДЛЯ FORTE/ДРУГИХ
-        if not txs:
-            txs = await parse_with_llm(full_text)
+            for line in text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
 
-        # 3. ФИНАЛЬНЫЙ ВОЗВРАТ ДАННЫХ
-        # Теперь мы не считаем 'total' здесь, чтобы Lovable сделал это математически точно на фронте.
-        # Мы просто возвращаем чистый список транзакций с MCC-кодами.
-        return {"transactions": txs}
+                if should_ignore(line):
+                    continue
+
+                tx = parse_line(line)
+                if tx:
+                    transactions.append(tx)
+                else:
+                    if "₸" in line and DATE_RE.search(line):
+                        logger.warning(f"UNPARSED LINE: {line}")
+
+        return {
+            "transactions": transactions
+        }
 
     except Exception as e:
+        logger.exception("PDF parsing failed")
         raise HTTPException(status_code=500, detail=str(e))
+
     finally:
-        if os.path.exists(temp_path): os.remove(temp_path)
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+# =========================
+# LOCAL RUN
+# =========================
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
 
 
 

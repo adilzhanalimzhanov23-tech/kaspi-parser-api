@@ -2,7 +2,7 @@ import re
 import os
 import shutil
 import logging
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal
 from typing import Optional, List, Dict
 
 import pypdfium2 as pdf
@@ -10,7 +10,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 
 # =========================
-# НАСТРОЙКИ ПРИЛОЖЕНИЯ
+# APP CONFIG
 # =========================
 
 app = FastAPI()
@@ -28,10 +28,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(
 logger = logging.getLogger("bank_pdf_parser")
 
 # =========================
-# РЕГУЛЯРНЫЕ ВЫРАЖЕНИЯ (FORTE & KASPI)
+# REGEX DEFINITIONS
 # =========================
 
-# Игнорируем технические строки и доходы
 IGNORE_PATTERNS = [
     re.compile(p, re.IGNORECASE) for p in [
         "пополнение", "перевод самому себе", "депозит", 
@@ -39,80 +38,88 @@ IGNORE_PATTERNS = [
     ]
 ]
 
-# Универсальный поиск даты: DD.MM.YY или DD.MM.YYYY
 DATE_RE = re.compile(r"(\d{2}\.\d{2}\.\d{2,4})")
-
-# Поиск суммы: ловит форматы "-1 500.00", "1500,00", "- 500"
-# Обязательно ищет привязку к валюте ₸, T, KZT или "тенге"
 AMOUNT_WITH_CURRENCY_RE = re.compile(
     r"(?P<amount>-?\s?\d[\d\s,.]*)\s*(?:₸|T|KZT|тенге)", 
     re.IGNORECASE
 )
-
-# Поиск MCC: 4 цифры подряд
-MCC_RE = re.compile(r"\b(?P<mcc>\d{4})\b")
+MCC_RE = re.compile(r"\bMCC[:\s]?(?P<mcc>\d{4})\b")
 
 # =========================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# HELPERS
 # =========================
 
 def clean_amount(val_str: str) -> Decimal:
-    """Превращает 'грязную' строку суммы в чистое число Decimal."""
+    """Нормализует строку суммы в число."""
     try:
-        # Убираем всё, кроме цифр, точки, запятой и минуса
         cleaned = re.sub(r"[^\d,.-]", "", val_str)
-        # Заменяем запятую на точку для стандарта Decimal
         if "," in cleaned and "." in cleaned:
-            cleaned = cleaned.replace(",", "") # для формата 1,200.50
+            cleaned = cleaned.replace(",", "")
         else:
-            cleaned = cleaned.replace(",", ".") # для формата 1200,50
-        
+            cleaned = cleaned.replace(",", ".")
         return Decimal(cleaned)
     except Exception:
         return Decimal("0")
 
 def parse_line(line: str) -> Optional[Dict]:
-    """Разбирает одну строку текста из выписки."""
+    """Извлекает данные и очищает имя мерчанта от мусора."""
     
-    # 1. Ищем дату. Нет даты — нет транзакции.
+    # 1. Поиск даты
     date_match = DATE_RE.search(line)
     if not date_match:
         return None
+    date_str = date_match.group(1)
 
-    # 2. Ищем сумму с валютой (основной признак транзакции в Forte/Kaspi)
+    # 2. Поиск суммы и валюты
     amount_match = AMOUNT_WITH_CURRENCY_RE.search(line)
     if not amount_match:
         return None
 
     try:
-        raw_amount = amount_match.group("amount")
-        amount_dec = clean_amount(raw_amount)
+        full_amount_str = amount_match.group(0) # например, "-590.00 KZT"
+        amount_dec = clean_amount(amount_match.group("amount"))
 
-        # Нас интересуют только расходы (отрицательные суммы)
+        # Берем только расходы
         if amount_dec >= 0:
             return None
 
-        # 3. Ищем MCC (4 цифры), исключая саму дату
-        mcc = None
-        all_numbers = MCC_RE.findall(line)
-        date_str = date_match.group(1)
-        for num in all_numbers:
-            if num not in date_str:
-                mcc = num
-                break
+        # 3. Поиск MCC
+        mcc_match = MCC_RE.search(line)
+        mcc = mcc_match.group("mcc") if mcc_match else None
+
+        # --- ОЧИСТКА ИМЕНИ (NAME) ---
+        clean_name = line
+        
+        # Удаляем дату, полную подстроку суммы и валюты
+        clean_name = clean_name.replace(date_str, "")
+        clean_name = clean_name.replace(full_amount_str, "")
+        
+        # Удаляем упоминание MCC
+        if mcc:
+            clean_name = re.sub(rf"MCC[:\s]*{mcc}", "", clean_name)
+            clean_name = clean_name.replace(mcc, "")
+
+        # Удаляем банковский шум и ключевые слова
+        noise = ["Покупка", "Платеж", "Перевод", "Retail", "KZT", "₸", "Тенге", "Jusan Bank"]
+        for word in noise:
+            clean_name = re.sub(rf"\b{word}\b", "", clean_name, flags=re.IGNORECASE)
+        
+        # Финальная чистка лишних знаков препинания и пробелов
+        clean_name = re.sub(r"^\W+|\W+$", "", clean_name) # Удаляем символы в начале и конце
+        clean_name = re.sub(r"\s+", " ", clean_name).strip()
 
         return {
             "date": date_str,
-            "amount": float(abs(amount_dec)), # Возвращаем положительное число для фронта
-            "name": line.strip(),
+            "amount": float(abs(amount_dec)),
+            "name": clean_name if clean_name else "Неизвестный мерчант",
             "mcc": mcc
         }
     except Exception as e:
-        logger.error(f"Ошибка парсинга строки: {line} -> {e}")
+        logger.error(f"Error parsing line: {e}")
         return None
 
 # =========================
-# API ЭНДПОИНТЫ
+# API ROUTES
 # =========================
 
 @app.post("/analyze")
@@ -120,7 +127,6 @@ async def analyze_pdf(
     file: UploadFile = File(...), 
     x_api_key: Optional[str] = Header(None)
 ):
-    # Проверка ключа доступа
     if x_api_key != API_KEY_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden")
 
@@ -129,44 +135,28 @@ async def analyze_pdf(
         shutil.copyfileobj(file.file, buffer)
 
     transactions = []
-    
     try:
         doc = pdf.PdfDocument(temp_path)
-        
         for page in doc:
-            text_page = page.get_textpage()
-            text_content = text_page.get_text_range()
-            
-            for line in text_content.splitlines():
+            text = page.get_textpage().get_text_range()
+            for line in text.splitlines():
                 line = line.strip()
-                if not line:
+                if not line or any(p.search(line) for p in IGNORE_PATTERNS):
                     continue
-
-                # Пропускаем игнорируемые паттерны
-                if any(p.search(line) for p in IGNORE_PATTERNS):
-                    continue
-
+                
                 tx = parse_line(line)
                 if tx:
                     transactions.append(tx)
-                else:
-                    # Логируем подозрительные строки, которые не распарсились
-                    if any(curr in line for curr in ["₸", "KZT", "T"]):
-                        logger.info(f"ПРОПУЩЕНА СТРОКА: {line}")
+                elif any(curr in line for curr in ["₸", "KZT", "T"]):
+                    logger.info(f"SKIPPED LINE: {line}")
 
         if not transactions:
-            logger.error("Транзакции не найдены в файле")
-            raise HTTPException(
-                status_code=422, 
-                detail="Парсер не нашёл транзакций. Проверьте, что это выписка Forte или Kaspi."
-            )
+            raise HTTPException(status_code=422, detail="Транзакции не найдены.")
 
         return {"transactions": transactions}
 
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.exception("Критическая ошибка парсинга")
+        logger.exception("Parse error")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if os.path.exists(temp_path):

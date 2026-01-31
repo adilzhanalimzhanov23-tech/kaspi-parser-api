@@ -8,7 +8,11 @@ Deploy on Render. Compatible with existing frontend.
 import re
 import os
 import shutil
+import base64
+from io import BytesIO
 from typing import List, Dict, Optional
+from datetime import datetime
+from collections import defaultdict
 from fastapi import FastAPI, UploadFile, File, HTTPException, Header, Form
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -18,6 +22,17 @@ try:
 except ImportError:
     import pdfplumber
     PDF_ENGINE = "pdfplumber"
+
+# Try to import matplotlib for charts
+try:
+    import matplotlib
+    matplotlib.use('Agg')  # Non-interactive backend
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+    from matplotlib.ticker import FuncFormatter
+    CHARTS_ENABLED = True
+except ImportError:
+    CHARTS_ENABLED = False
 
 app = FastAPI()
 
@@ -329,6 +344,215 @@ def aggregate_transactions(transactions: List[Dict]) -> Dict:
         "categories": category_list,
         "daily": daily_list,
     }
+
+
+# ==================== CHART GENERATION ====================
+
+def parse_date(date_str: str) -> Optional[datetime]:
+    """Parse date string to datetime object"""
+    for fmt in ["%d.%m.%Y", "%d.%m.%y", "%Y-%m-%d"]:
+        try:
+            return datetime.strptime(date_str, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def generate_monthly_charts(transactions: List[Dict]) -> Dict[str, str]:
+    """
+    Generate charts for each month showing daily expenses vs income.
+    Returns dict of {month_key: base64_encoded_png}
+    """
+    if not CHARTS_ENABLED:
+        return {}
+    
+    # Group transactions by month
+    monthly_data = defaultdict(lambda: {"dates": [], "expenses": defaultdict(float), "income": defaultdict(float)})
+    
+    for tx in transactions:
+        dt = parse_date(tx["date"])
+        if not dt:
+            continue
+        
+        month_key = dt.strftime("%Y-%m")
+        day = dt.day
+        
+        if tx["amount"] < 0:
+            monthly_data[month_key]["expenses"][day] += abs(tx["amount"])
+        else:
+            monthly_data[month_key]["income"][day] += tx["amount"]
+    
+    charts = {}
+    
+    # Russian month names
+    month_names = {
+        1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель",
+        5: "Май", 6: "Июнь", 7: "Июль", 8: "Август",
+        9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь"
+    }
+    
+    for month_key in sorted(monthly_data.keys()):
+        data = monthly_data[month_key]
+        year, month = map(int, month_key.split("-"))
+        
+        # Determine days in month
+        if month == 12:
+            days_in_month = 31
+        else:
+            next_month = datetime(year, month + 1, 1)
+            days_in_month = (next_month - datetime(year, month, 1)).days
+        
+        days = list(range(1, days_in_month + 1))
+        expenses = [data["expenses"].get(d, 0) for d in days]
+        income = [data["income"].get(d, 0) for d in days]
+        
+        # Create figure
+        fig, ax = plt.subplots(figsize=(12, 5), dpi=100)
+        
+        # Bar width
+        width = 0.35
+        x = range(len(days))
+        
+        # Plot bars
+        bars_exp = ax.bar([i - width/2 for i in x], expenses, width, 
+                         label='Расходы', color='#ef4444', alpha=0.8)
+        bars_inc = ax.bar([i + width/2 for i in x], income, width,
+                         label='Доходы', color='#22c55e', alpha=0.8)
+        
+        # Formatting
+        ax.set_xlabel('День месяца', fontsize=11)
+        ax.set_ylabel('Сумма (₸)', fontsize=11)
+        ax.set_title(f'{month_names[month]} {year}', fontsize=14, fontweight='bold')
+        ax.set_xticks(x)
+        ax.set_xticklabels(days, fontsize=9)
+        ax.legend(loc='upper right')
+        
+        # Format y-axis with thousands separator
+        def format_thousands(x, p):
+            if x >= 1000:
+                return f'{x/1000:.0f}K'
+            return f'{x:.0f}'
+        ax.yaxis.set_major_formatter(FuncFormatter(format_thousands))
+        
+        # Add grid
+        ax.grid(axis='y', alpha=0.3)
+        ax.set_axisbelow(True)
+        
+        # Calculate totals for subtitle
+        total_exp = sum(expenses)
+        total_inc = sum(income)
+        ax.text(0.5, -0.12, f'Всего: расходы {total_exp:,.0f} ₸ | доходы {total_inc:,.0f} ₸ | баланс {total_inc - total_exp:+,.0f} ₸',
+                transform=ax.transAxes, ha='center', fontsize=10, color='#666')
+        
+        plt.tight_layout()
+        
+        # Save to base64
+        buffer = BytesIO()
+        plt.savefig(buffer, format='png', bbox_inches='tight', facecolor='white')
+        buffer.seek(0)
+        img_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+        plt.close(fig)
+        
+        charts[month_key] = img_base64
+    
+    return charts
+
+
+def generate_summary_chart(transactions: List[Dict]) -> Optional[str]:
+    """
+    Generate a summary chart showing expenses by category (pie chart)
+    and daily trend (line chart).
+    Returns base64 encoded PNG.
+    """
+    if not CHARTS_ENABLED or not transactions:
+        return None
+    
+    # Aggregate data
+    category_totals = defaultdict(float)
+    daily_expenses = defaultdict(float)
+    daily_income = defaultdict(float)
+    
+    for tx in transactions:
+        dt = parse_date(tx["date"])
+        if not dt:
+            continue
+        
+        if tx["amount"] < 0:
+            # Get category
+            cat = categorize_transaction(tx["name"], tx.get("mcc"), tx.get("description", ""))
+            category_totals[cat] += abs(tx["amount"])
+            daily_expenses[dt] += abs(tx["amount"])
+        else:
+            daily_income[dt] += tx["amount"]
+    
+    if not category_totals:
+        return None
+    
+    # Create figure with 2 subplots
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5), dpi=100)
+    
+    # === Pie Chart (Categories) ===
+    categories = list(category_totals.keys())
+    values = list(category_totals.values())
+    
+    # Colors for categories
+    colors = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#14b8a6', 
+              '#3b82f6', '#8b5cf6', '#ec4899', '#6b7280', '#78716c']
+    
+    # Sort by value
+    sorted_data = sorted(zip(categories, values), key=lambda x: x[1], reverse=True)
+    categories, values = zip(*sorted_data) if sorted_data else ([], [])
+    
+    wedges, texts, autotexts = ax1.pie(
+        values, 
+        labels=categories,
+        autopct=lambda pct: f'{pct:.1f}%' if pct > 5 else '',
+        colors=colors[:len(categories)],
+        startangle=90
+    )
+    ax1.set_title('Расходы по категориям', fontsize=12, fontweight='bold')
+    
+    # === Line Chart (Daily Trend) ===
+    if daily_expenses:
+        dates = sorted(daily_expenses.keys())
+        exp_values = [daily_expenses[d] for d in dates]
+        inc_values = [daily_income.get(d, 0) for d in dates]
+        
+        ax2.fill_between(dates, exp_values, alpha=0.3, color='#ef4444')
+        ax2.plot(dates, exp_values, color='#ef4444', linewidth=2, label='Расходы', marker='o', markersize=3)
+        
+        if any(inc_values):
+            ax2.fill_between(dates, inc_values, alpha=0.3, color='#22c55e')
+            ax2.plot(dates, inc_values, color='#22c55e', linewidth=2, label='Доходы', marker='o', markersize=3)
+        
+        ax2.set_xlabel('Дата', fontsize=11)
+        ax2.set_ylabel('Сумма (₸)', fontsize=11)
+        ax2.set_title('Динамика расходов и доходов', fontsize=12, fontweight='bold')
+        ax2.legend(loc='upper right')
+        ax2.grid(axis='y', alpha=0.3)
+        
+        # Format x-axis dates
+        ax2.xaxis.set_major_formatter(mdates.DateFormatter('%d.%m'))
+        ax2.xaxis.set_major_locator(mdates.AutoDateLocator())
+        plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45, ha='right')
+        
+        # Format y-axis
+        def format_thousands(x, p):
+            if x >= 1000:
+                return f'{x/1000:.0f}K'
+            return f'{x:.0f}'
+        ax2.yaxis.set_major_formatter(FuncFormatter(format_thousands))
+    
+    plt.tight_layout()
+    
+    # Save to base64
+    buffer = BytesIO()
+    plt.savefig(buffer, format='png', bbox_inches='tight', facecolor='white')
+    buffer.seek(0)
+    img_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+    plt.close(fig)
+    
+    return img_base64
 
 
 def detect_bank(text: str) -> str:
@@ -876,11 +1100,26 @@ def parse_forte(text: str, lines: List[str]) -> List[Dict]:
             name_parts = details_clean.split(",")
             if name_parts:
                 name = name_parts[0].strip()
-                # Clean up common prefixes
-                name = re.sub(r"^(KASPI_QR_RETAILER|Получатель:)\s*", "", name)
-                name = name.strip()
             else:
                 name = details_clean
+            
+            # Handle KASPI_QR_RETAILER - keep it but add MCC category for clarity
+            if name == "KASPI_QR_RETAILER" or name.startswith("KASPI_QR"):
+                # Create descriptive name based on MCC
+                mcc_names = {
+                    "5411": "Kaspi QR: Продукты",
+                    "5412": "Kaspi QR: Продукты",
+                    "5812": "Kaspi QR: Ресторан",
+                    "5814": "Kaspi QR: Фастфуд",
+                    "5411": "Kaspi QR: Супермаркет",
+                    "5533": "Kaspi QR: Автозапчасти",
+                    "5641": "Kaspi QR: Одежда",
+                    "5732": "Kaspi QR: Электроника",
+                    "5912": "Kaspi QR: Аптека",
+                    "5977": "Kaspi QR: Косметика",
+                    "5992": "Kaspi QR: Цветы",
+                }
+                name = mcc_names.get(mcc, f"Kaspi QR ({mcc or 'покупка'})")
             
             # Handle transfers
             if operation == "Перевод" and "Получатель:" in details:
@@ -932,6 +1171,7 @@ async def root():
 async def analyze(
     file: UploadFile = File(...),
     bank: Optional[str] = Form(None),
+    include_charts: Optional[str] = Form("false"),
     x_api_key: Optional[str] = Header(None)
 ):
     """
@@ -939,6 +1179,7 @@ async def analyze(
     
     - file: PDF file
     - bank: Bank type (kaspi, halyk, freedom, centrecredit, alatau, forte) or auto-detect
+    - include_charts: "true" to include base64 encoded chart images
     - x_api_key: API key for authentication
     
     Returns full analytics:
@@ -949,6 +1190,7 @@ async def analyze(
     - income_sources: income sources grouped  
     - categories: expenses by category
     - daily: daily expense/income breakdown
+    - charts: (optional) monthly and summary charts as base64 PNG
     """
     if x_api_key != API_KEY_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -981,12 +1223,34 @@ async def analyze(
         # Aggregate and categorize
         analytics = aggregate_transactions(transactions)
         
+        # Generate charts if requested
+        charts = None
+        if include_charts.lower() == "true" and CHARTS_ENABLED:
+            print("[Parser] Generating charts...")
+            charts = {
+                "monthly": generate_monthly_charts(transactions),
+                "summary": generate_summary_chart(transactions),
+                "charts_enabled": True
+            }
+        elif include_charts.lower() == "true":
+            charts = {
+                "monthly": {},
+                "summary": None,
+                "charts_enabled": False,
+                "message": "matplotlib not installed on server"
+            }
+        
         # Return full response
-        return {
+        response = {
             "bank": detected_bank,
             "transactions": transactions,
             **analytics
         }
+        
+        if charts:
+            response["charts"] = charts
+        
+        return response
     
     except HTTPException:
         raise
@@ -996,6 +1260,15 @@ async def analyze(
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
+
+
+@app.get("/charts-status")
+async def charts_status():
+    """Check if charts generation is available"""
+    return {
+        "charts_enabled": CHARTS_ENABLED,
+        "message": "Charts available" if CHARTS_ENABLED else "Install matplotlib to enable charts"
+    }
 
 
 if __name__ == "__main__":

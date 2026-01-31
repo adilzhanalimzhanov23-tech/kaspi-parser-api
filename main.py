@@ -118,13 +118,13 @@ def detect_category(name: str, mcc: Optional[str] = None) -> Optional[str]:
 # ==================== BANK DETECTION ====================
 
 BANK_SIGNATURES = {
-    "kaspi": [r"Kaspi\s*(Bank|Gold|Pay)", r"kaspi\.kz", r"CASPKZKA", r"Kaspi Gold"],  # Check first
+    "forte": [r"ForteBank", r"Forte", r"IRTYKZKA", r"forte\.kz"],  # Check FIRST - Forte PDFs contain "Halyk Bank" in details
+    "kaspi": [r"Kaspi\s*(Bank|Gold|Pay)", r"kaspi\.kz", r"CASPKZKA", r"Kaspi Gold"],
     "alatau": [r"Alatau\s*City\s*Bank", r"TSESKZKA", r"alataucitybank\.kz"],
-    "halyk": [r"Halyk", r"Народный Банк", r"HSBKKZKX", r"halykbank"],
+    "halyk": [r"АО.*Народный Банк", r"HSBKKZKX", r"halykbank\.kz"],  # More specific to avoid false match
     "freedom": [r"Freedom\s*Bank", r"Фридом", r"KSNVKZKA", r"bankffin"],
     "centrecredit": [r"ЦентрКредит", r"CenterCredit", r"KCJBKZKX", r"bcc\.kz"],
-    "forte": [r"Forte\s*Bank", r"Форте", r"fortebank"],
-    "jusan": [r"Jusan", r"Жусан"],
+    "jusan": [r"Jusan\s*Bank", r"Жусан"],
 }
 
 IGNORE_PATTERNS = [
@@ -799,34 +799,109 @@ def parse_alatau(text: str, lines: List[str]) -> List[Dict]:
 
 
 def parse_forte(text: str, lines: List[str]) -> List[Dict]:
-    """Parse Forte Bank statement"""
+    """Parse Forte Bank statement - format with MCC at end of details"""
     transactions = []
     
-    # Forte format: Date | Description | MCC | Amount | Balance
-    pattern = re.compile(
-        r"(\d{2}\.\d{2}\.\d{4})\s+"
-        r"(.+?)\s+"
-        r"(?:MCC[:\s]*(\d{4}))?\s*"
-        r"(-?[\d\s,]+[.,]\d{2})\s*(?:KZT|₸)"
+    # Forte format (may span multiple lines):
+    # DD.MM.YYYY -Amount KZT Описание DETAILS, MCC: XXXX
+    # or DD.MM.YYYY Amount KZT Пополнение счета DETAILS
+    
+    # First, join lines that are continuation of previous (don't start with date)
+    joined_lines = []
+    current_line = ""
+    
+    for line in lines:
+        # Skip header lines
+        if any(skip in line for skip in ["Дата Сумма", "Детализация выписки", "заблокированная сумма"]):
+            continue
+            
+        # Check if line starts with date pattern
+        if re.match(r"^\d{2}\.\d{2}\.\d{4}", line.strip()):
+            if current_line:
+                joined_lines.append(current_line)
+            current_line = line.strip()
+        elif current_line:
+            # Continuation of previous line - join with space
+            current_line += " " + line.strip()
+    
+    if current_line:
+        joined_lines.append(current_line)
+    
+    # Pattern for Forte transactions
+    forte_pattern = re.compile(
+        r"^(\d{2}\.\d{2}\.\d{4})\s+"           # Date
+        r"(-?[\d\s]+[.,]\d{2})\s*KZT\s+"       # Amount
+        r"(Покупка|Пополнение счета|Перевод|Платеж)\s*"  # Operation type
+        r"(.+)$"                                 # Details (including MCC)
     )
     
-    for match in pattern.finditer(text):
-        date = match.group(1)
-        detail = match.group(2).strip()
-        mcc = match.group(3)
-        amount = clean_amount(match.group(4))
-        
-        name = clean_name(detail)
-        if should_ignore(name) or amount == 0:
-            continue
-        
-        transactions.append({
-            "date": date,
-            "amount": amount,
-            "name": name,
-            "mcc": mcc,
-            "description": "Покупка" if amount < 0 else "Пополнение"
-        })
+    for line in joined_lines:
+        match = forte_pattern.match(line)
+        if match:
+            date = match.group(1)
+            amount_str = match.group(2).replace(" ", "").replace(",", ".")
+            operation = match.group(3)
+            details = match.group(4).strip()
+            
+            try:
+                amount = float(amount_str)
+            except:
+                continue
+            
+            # Skip zero amounts
+            if amount == 0:
+                continue
+            
+            # Extract MCC from details - handle split MCC like "MCC: 41 21" -> "4121"
+            mcc = None
+            # First try normal MCC pattern
+            mcc_match = re.search(r"MCC[:\s]*(\d{4})", details)
+            if mcc_match:
+                mcc = mcc_match.group(1)
+            else:
+                # Try split MCC pattern (e.g., "MCC: 41 21" or "MCC: 5 814")
+                mcc_split = re.search(r"MCC[:\s]*(\d{1,2})\s+(\d{2,3})", details)
+                if mcc_split:
+                    mcc = mcc_split.group(1) + mcc_split.group(2)
+                    if len(mcc) == 4:
+                        pass  # Valid MCC
+                    else:
+                        mcc = None
+            
+            # Remove MCC from details for cleaner name
+            details_clean = re.sub(r",?\s*MCC[:\s]*\d+\s*\d*\s*$", "", details).strip()
+            
+            # Extract merchant name from details
+            # Format: "MERCHANT,LOCATION,CITY,KZ, Bank Name" or just "MERCHANT"
+            name_parts = details_clean.split(",")
+            if name_parts:
+                name = name_parts[0].strip()
+                # Clean up common prefixes
+                name = re.sub(r"^(KASPI_QR_RETAILER|Получатель:)\s*", "", name)
+                name = name.strip()
+            else:
+                name = details_clean
+            
+            # Handle transfers
+            if operation == "Перевод" and "Получатель:" in details:
+                card_match = re.search(r"(\d{6}\*+\d{4})", details)
+                name = f"Перевод {card_match.group(1) if card_match else ''}"
+            
+            # Handle bus payments
+            if "Avtobys" in details:
+                name = "Avtobys (Проезд)"
+                mcc = mcc or "4111"  # Public transport MCC
+            
+            if not name or should_ignore(name):
+                continue
+            
+            transactions.append({
+                "date": date,
+                "amount": amount,
+                "name": name[:80],
+                "mcc": mcc,
+                "description": operation
+            })
     
     return transactions
 
@@ -926,5 +1001,3 @@ async def analyze(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
-

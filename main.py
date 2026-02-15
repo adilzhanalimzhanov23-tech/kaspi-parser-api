@@ -617,99 +617,77 @@ def clean_amount(amount_str: str) -> float:
 # ==================== BANK PARSERS ====================
 
 def parse_kaspi(text: str, lines: List[str]) -> List[Dict]:
-    """Parse Kaspi Bank statement - new format with ₸ symbol"""
+    """Robust Kaspi parser (post-line based)"""
+
     transactions = []
-    
-    # Kaspi format: DD.MM.YY [+-] 12 600,00 ₸ Операция Детали
-    # Note: amount has space as thousands separator, comma as decimal
-    kaspi_pattern = re.compile(
-        r"^(\d{2}\.\d{2}\.\d{2})\s+"          # Date DD.MM.YY
-        r"([+-])\s+"                           # Sign with space
-        r"([\d\s]+,\d{2})\s*₸\s+"              # Amount (space separated thousands, comma decimal)
-        r"(Перевод|Покупка|Пополнение|Снятие|Разное)\s+"  # Operation
-        r"(.+)$"                               # Details
-    )
-    
-    for line in lines:
-        match = kaspi_pattern.match(line.strip())
-        if match:
-            date = match.group(1)
-            sign = match.group(2)
-            amount_str = match.group(3).replace(" ", "").replace(",", ".")
-            operation = match.group(4)
-            details = match.group(5).strip()
-            
-            try:
-                amount = float(amount_str)
-                if sign == "-":
-                    amount = -amount
-            except:
-                continue
-            
-            name = clean_name(details)
-            
-            if should_ignore(name):
-                continue
-            
-            # Convert date from DD.MM.YY to DD.MM.20YY
-            date = date[:6] + "20" + date[6:]
-            
+    i = 0
+
+    while i < len(lines):
+        line = lines[i].strip()
+
+        # 1️⃣ Ищем начало транзакции по дате
+        date_match = re.match(r"^(\d{2}\.\d{2}\.\d{2})", line)
+        if not date_match:
+            i += 1
+            continue
+
+        raw_date = date_match.group(1)
+        date = raw_date[:6] + "20" + raw_date[6:]  # 24.01.26 → 24.01.2026
+
+        full_line = line
+
+        # 2️⃣ Если описание перенесено — собираем до новой даты
+        j = i + 1
+        while j < len(lines):
+            if re.match(r"^\d{2}\.\d{2}\.\d{2}", lines[j]):
+                break
+            full_line += " " + lines[j].strip()
+            j += 1
+
+        # 3️⃣ Ищем сумму
+        amount_match = re.search(r"([+-]?)\s*([\d\s]+,\d{2})\s*₸?", full_line)
+        if not amount_match:
+            i = j
+            continue
+
+        sign = amount_match.group(1)
+        amount_str = amount_match.group(2).replace(" ", "").replace(",", ".")
+
+        try:
+            amount = float(amount_str)
+        except:
+            i = j
+            continue
+
+        if sign == "-":
+            amount = -amount
+
+        # 4️⃣ Определяем описание (всё после суммы)
+        description_part = full_line[amount_match.end():].strip()
+
+        # Убираем тип операции
+        description_part = re.sub(
+            r"^(Перевод|Покупка|Пополнение|Снятие|Разное)\s+",
+            "",
+            description_part,
+            flags=re.IGNORECASE
+        )
+
+        name = clean_name(description_part)
+
+        if not should_ignore(name):
             transactions.append({
                 "date": date,
                 "amount": amount,
                 "name": name,
                 "mcc": None,
-                "description": operation
+                "description": "Покупка" if amount < 0 else "Пополнение"
             })
-    
-    # Fallback: old format with KZT (for older statements)
-    if not transactions:
-        for i, line in enumerate(lines):
-            date_m = re.search(r"(\d{2}\.\d{2}\.\d{4})", line)
-            amount_m = re.search(r"(-?\d[\d\s]*\.\d{2})\s*KZT", line)
-            
-            if date_m and amount_m:
-                if "Пополнение" in line and "Покупка" not in line:
-                    continue
-                
-                is_transfer = "Перевод" in line
-                current_amount = float(amount_m.group(1).replace(" ", ""))
-                
-                details_block = []
-                for j in range(i + 1, min(i + 5, len(lines))):
-                    if re.search(r"\d{2}\.\d{2}\.\d{4}", lines[j]):
-                        break
-                    details_block.append(lines[j])
-                
-                full_details = " ".join(details_block)
-                
-                mcc = None
-                if not is_transfer:
-                    search_zone = line + " " + full_details
-                    collapsed = re.sub(r"\s+", "", search_zone)
-                    mcc_match = re.search(r"MCC:?(\d{4})", collapsed, re.IGNORECASE)
-                    if mcc_match:
-                        mcc = mcc_match.group(1)
-                
-                if "," in line or "Получатель" in line:
-                    name = clean_name(line)
-                elif details_block:
-                    name = clean_name(details_block[0])
-                else:
-                    name = "Транзакция"
-                
-                if should_ignore(name):
-                    continue
-                
-                transactions.append({
-                    "date": date_m.group(1),
-                    "amount": current_amount,
-                    "name": name,
-                    "mcc": mcc,
-                    "description": "Перевод" if is_transfer else "Покупка"
-                })
-    
+
+        i = j
+
     return transactions
+
 
 
 def parse_halyk(text: str, lines: List[str]) -> List[Dict]:
@@ -1273,5 +1251,6 @@ async def charts_status():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
 
 

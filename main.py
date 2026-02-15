@@ -713,76 +713,122 @@ def parse_kaspi(text: str, lines: List[str]) -> List[Dict]:
 
 
 def parse_halyk(text: str, lines: List[str]) -> List[Dict]:
-    """Parse Halyk Bank statement"""
+    """Parse Halyk Bank statement - improved to handle multi-line merchant names"""
     transactions = []
     
-    # Pattern: DD.MM.YYYY DD.MM.YYYY Description Amount KZT Income Expense
-    pattern = re.compile(
-        r"(\d{2}\.\d{2}\.\d{4})\s+\d{2}\.\d{2}\.\d{4}\s+"
-        r"(.+?)\s+"
-        r"(-?[\d\s,]+[.,]\d{2})\s+KZT\s+"
-        r"([\d\s,]+[.,]\d{2})\s+"
-        r"(-?[\d\s,]+[.,]\d{2})"
-    )
-    
-    for match in pattern.finditer(text):
-        date = match.group(1)
-        detail = match.group(2).strip()
-        income = clean_amount(match.group(4))
-        expense = clean_amount(match.group(5))
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
         
-        # Clean up description
-        detail = re.sub(r"Операция оплаты у коммерсанта\s*", "", detail)
-        detail = re.sub(r"Поступление на счет\s*", "", detail)
-        name = clean_name(detail)
-        
-        if should_ignore(name):
+        # Skip empty lines and headers
+        if not line or any(skip in line for skip in ["Дата проведения", "Всего:", "Место печати"]):
+            i += 1
             continue
         
-        # MCC from description
-        mcc = None
-        mcc_match = re.search(r"MCC[:\s]*(\d{4})", detail)
-        if mcc_match:
-            mcc = mcc_match.group(1)
+        # Look for date pattern at start of line
+        date_match = re.match(r"^(\d{2}\.\d{2}\.\d{4})\s+", line)
+        if not date_match:
+            i += 1
+            continue
         
-        if expense > 0:
-            transactions.append({
-                "date": date,
-                "amount": -abs(expense),  # Negative for expense
-                "name": name,
-                "mcc": mcc,
-                "description": "Покупка"
-            })
-        elif income > 0:
-            transactions.append({
-                "date": date,
-                "amount": income,  # Positive for income
-                "name": name,
-                "mcc": mcc,
-                "description": "Пополнение"
-            })
-    
-    # Fallback: simpler pattern
-    if not transactions:
-        simple_pattern = re.compile(
-            r"(\d{2}\.\d{2}\.\d{4})\s+(.+?)\s+(-?[\d\s,]+[.,]\d{2})\s*KZT"
-        )
-        for match in simple_pattern.finditer(text):
-            date = match.group(1)
-            detail = match.group(2).strip()
-            amount = clean_amount(match.group(3))
+        date = date_match.group(1)
+        rest_of_line = line[date_match.end():].strip()
+        
+        # Check if this is a transaction line (has second date)
+        second_date_match = re.match(r"^(\d{2}\.\d{2}\.\d{4})\s+", rest_of_line)
+        if not second_date_match:
+            i += 1
+            continue
+        
+        rest_of_line = rest_of_line[second_date_match.end():].strip()
+        
+        # Now collect the full description (may span multiple lines)
+        description_parts = [rest_of_line]
+        
+        # Look ahead for continuation lines (no date at start)
+        j = i + 1
+        while j < len(lines):
+            next_line = lines[j].strip()
             
-            name = clean_name(detail)
-            if should_ignore(name) or amount == 0:
+            # Skip empty lines
+            if not next_line:
+                j += 1
                 continue
             
-            transactions.append({
-                "date": date,
-                "amount": amount,
-                "name": name,
-                "mcc": None,
-                "description": "Покупка" if amount < 0 else "Пополнение"
-            })
+            # Stop if we hit a new transaction (starts with date)
+            if re.match(r"^\d{2}\.\d{2}\.\d{4}", next_line):
+                break
+            
+            # Stop if we find amount pattern (ends with KZT and numbers)
+            if re.search(r"KZT\s+[\d\s,]+[.,]\d{2}\s+[\d\s,]+[.,]\d{2}$", next_line):
+                description_parts.append(next_line)
+                j += 1
+                break
+            
+            description_parts.append(next_line)
+            j += 1
+        
+        full_description = " ".join(description_parts)
+        
+        # Now parse the amounts from the collected text
+        amount_match = re.search(
+            r"(-?[\d\s,]+[.,]\d{2})\s+KZT\s+([\d\s,]+[.,]\d{2})\s+([\d\s,]+[.,]\d{2})$",
+            full_description
+        )
+        
+        if amount_match:
+            income = clean_amount(amount_match.group(2))
+            expense = clean_amount(amount_match.group(3))
+            
+            # Extract operation type and merchant name
+            # Patterns: "Операция оплаты у коммерсанта NAME" or "Поступление перевода" or "Перевод на другую карту"
+            op_match = re.search(
+                r"(Операция оплаты у\s*коммерсанта|Поступление перевода|Перевод на другую карту)\s+(.+?)(?:\s+-?[\d\s,]+[.,]\d{2}\s+KZT|$)",
+                full_description,
+                re.IGNORECASE
+            )
+            
+            if op_match:
+                operation_type = op_match.group(1)
+                merchant_raw = op_match.group(2).strip()
+                
+                # Clean merchant name - remove amount and KZT if present
+                merchant_raw = re.sub(r"\s+-?[\d\s,]+[.,]\d{2}.*$", "", merchant_raw)
+                name = clean_name(merchant_raw) if merchant_raw else operation_type
+                
+                # Determine operation
+                if "Поступление перевода" in operation_type:
+                    operation = "Пополнение"
+                elif "Перевод на другую карту" in operation_type:
+                    operation = "Перевод"
+                else:
+                    operation = "Покупка"
+                
+                # Extract MCC if present
+                mcc = None
+                mcc_match = re.search(r"MCC[:\s]*(\d{4})", full_description)
+                if mcc_match:
+                    mcc = mcc_match.group(1)
+                
+                if not should_ignore(name):
+                    if expense > 0:
+                        transactions.append({
+                            "date": date,
+                            "amount": -abs(expense),
+                            "name": name,
+                            "mcc": mcc,
+                            "description": operation
+                        })
+                    elif income > 0:
+                        transactions.append({
+                            "date": date,
+                            "amount": income,
+                            "name": name,
+                            "mcc": mcc,
+                            "description": operation
+                        })
+        
+        i = j if j > i else i + 1
     
     return transactions
 

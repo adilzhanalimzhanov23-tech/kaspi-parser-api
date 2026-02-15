@@ -133,10 +133,10 @@ def detect_category(name: str, mcc: Optional[str] = None) -> Optional[str]:
 # ==================== BANK DETECTION ====================
 
 BANK_SIGNATURES = {
-    "forte": [r"ForteBank", r"Forte", r"IRTYKZKA", r"forte\.kz"],  # Check FIRST - Forte PDFs contain "Halyk Bank" in details
+    "forte": [r"ForteBank", r"Forte", r"IRTYKZKA", r"forte\.kz"],
     "kaspi": [r"Kaspi\s*(Bank|Gold|Pay)", r"kaspi\.kz", r"CASPKZKA", r"Kaspi Gold"],
     "alatau": [r"Alatau\s*City\s*Bank", r"TSESKZKA", r"alataucitybank\.kz"],
-    "halyk": [r"АО.*Народный Банк", r"HSBKKZKX", r"halykbank\.kz"],  # More specific to avoid false match
+    "halyk": [r"АО.*Народный Банк", r"HSBKKZKX", r"halykbank\.kz"],
     "freedom": [r"Freedom\s*Bank", r"Фридом", r"KSNVKZKA", r"bankffin"],
     "centrecredit": [r"ЦентрКредит", r"CenterCredit", r"KCJBKZKX", r"bcc\.kz"],
     "jusan": [r"Jusan\s*Bank", r"Жусан"],
@@ -153,39 +153,22 @@ IGNORE_PATTERNS = [
 
 # MCC коды по категориям
 MCC_CATEGORIES = {
-    # Продукты питания
     "Продукты": ["5411", "5422", "5441", "5451", "5462", "5499", "5921"],
-    # Рестораны и кафе  
     "Рестораны": ["5812", "5813", "5814", "5811"],
-    # Транспорт
     "Транспорт": ["4111", "4112", "4121", "4131", "4784", "5541", "5542", "5983", "7512", "7523"],
-    # Такси и каршеринг
     "Такси": ["4121", "4789"],
-    # Одежда и обувь
     "Одежда": ["5611", "5621", "5631", "5641", "5651", "5661", "5681", "5691", "5699"],
-    # Здоровье и аптеки
     "Здоровье": ["5912", "8011", "8021", "8031", "8041", "8042", "8049", "8050", "8062", "8071", "8099"],
-    # Развлечения
     "Развлечения": ["7832", "7841", "7911", "7922", "7929", "7932", "7933", "7941", "7991", "7992", "7993", "7994", "7995", "7996", "7997", "7998", "7999"],
-    # Красота и уход
     "Красота": ["7230", "7297", "7298"],
-    # Электроника
     "Электроника": ["5722", "5732", "5733", "5734", "5735", "5945", "5946"],
-    # Дом и ремонт
     "Дом": ["5200", "5211", "5231", "5251", "5261", "5712", "5713", "5714", "5718", "5719", "5722"],
-    # Образование
     "Образование": ["8211", "8220", "8241", "8244", "8249", "8299"],
-    # Связь и интернет
     "Связь": ["4812", "4813", "4814", "4815", "4816", "4821", "4899"],
-    # Путешествия
     "Путешествия": ["3000", "3001", "4011", "4111", "4112", "4511", "4722", "7011", "7012", "7032", "7033"],
-    # Подписки и сервисы
     "Подписки": ["5815", "5816", "5817", "5818", "5968"],
-    # Супермаркеты
     "Супермаркеты": ["5311", "5331", "5399"],
-    # Переводы
     "Переводы": [],
-    # Прочее
     "Прочее": [],
 }
 
@@ -324,7 +307,7 @@ def aggregate_transactions(transactions: List[Dict]) -> Dict:
             daily[date]["income"] += t["amount"]
     
     # Сортировка
-    expense_list = sorted(expense_merchants.values(), key=lambda x: x["total"])  # От большего расхода к меньшему
+    expense_list = sorted(expense_merchants.values(), key=lambda x: x["total"])
     income_list = sorted(income_sources.values(), key=lambda x: x["total"], reverse=True)
     category_list = sorted(categories.values(), key=lambda x: x["total"])
     daily_list = sorted(daily.values(), key=lambda x: x["date"])
@@ -338,7 +321,7 @@ def aggregate_transactions(transactions: List[Dict]) -> Dict:
             "expense_count": len(expenses),
             "income_count": len(incomes),
         },
-        "merchants": expense_list,  # Для совместимости с фронтендом
+        "merchants": expense_list,
         "expense_sources": expense_list,
         "income_sources": income_list,
         "categories": category_list,
@@ -561,7 +544,7 @@ def detect_bank(text: str) -> str:
         for pattern in patterns:
             if re.search(pattern, text, re.IGNORECASE):
                 return bank
-    return "kaspi"  # Default
+    return "kaspi"
 
 
 def extract_text(path: str) -> str:
@@ -621,13 +604,12 @@ def parse_kaspi(text: str, lines: List[str]) -> List[Dict]:
     transactions = []
     
     # Kaspi format: DD.MM.YY [+-] 12 600,00 ₸ Операция Детали
-    # Note: amount has space as thousands separator, comma as decimal
     kaspi_pattern = re.compile(
-        r"^(\d{2}\.\d{2}\.\d{2})\s+"          # Date DD.MM.YY
-        r"([+-])\s+"                           # Sign with space
-        r"([\d\s]+,\d{2})\s*₸\s+"              # Amount (space separated thousands, comma decimal)
-        r"(Перевод|Покупка|Пополнение|Снятие|Разное)\s+"  # Operation
-        r"(.+)$"                               # Details
+        r"^(\d{2}\.\d{2}\.\d{2})\s+"
+        r"([+-])\s+"
+        r"([\d\s]+,\d{2})\s*₸\s+"
+        r"(Перевод|Покупка|Пополнение|Снятие|Разное)\s+"
+        r"(.+)$"
     )
     
     for line in lines:
@@ -662,7 +644,7 @@ def parse_kaspi(text: str, lines: List[str]) -> List[Dict]:
                 "description": operation
             })
     
-    # Fallback: old format with KZT (for older statements)
+    # Fallback: old format with KZT
     if not transactions:
         for i, line in enumerate(lines):
             date_m = re.search(r"(\d{2}\.\d{2}\.\d{4})", line)
@@ -713,7 +695,7 @@ def parse_kaspi(text: str, lines: List[str]) -> List[Dict]:
 
 
 def parse_halyk(text: str, lines: List[str]) -> List[Dict]:
-    """Parse Halyk Bank statement - improved to handle multi-line merchant names"""
+    """Parse Halyk Bank statement - improved multi-line format"""
     transactions = []
     
     i = 0
@@ -721,7 +703,7 @@ def parse_halyk(text: str, lines: List[str]) -> List[Dict]:
         line = lines[i].strip()
         
         # Skip empty lines and headers
-        if not line or any(skip in line for skip in ["Дата проведения", "Всего:", "Место печати"]):
+        if not line or any(skip in line for skip in ["Дата проведения", "Всего:", "Место печати", "Выписка по счету"]):
             i += 1
             continue
         
@@ -742,24 +724,22 @@ def parse_halyk(text: str, lines: List[str]) -> List[Dict]:
         
         rest_of_line = rest_of_line[second_date_match.end():].strip()
         
-        # Now collect the full description (may span multiple lines)
+        # Collect full description (may span multiple lines)
         description_parts = [rest_of_line]
         
-        # Look ahead for continuation lines (no date at start)
         j = i + 1
         while j < len(lines):
             next_line = lines[j].strip()
             
-            # Skip empty lines
             if not next_line:
                 j += 1
                 continue
             
-            # Stop if we hit a new transaction (starts with date)
+            # Stop if new transaction
             if re.match(r"^\d{2}\.\d{2}\.\d{4}", next_line):
                 break
             
-            # Stop if we find amount pattern (ends with KZT and numbers)
+            # Stop if amount line found
             if re.search(r"KZT\s+[\d\s,]+[.,]\d{2}\s+[\d\s,]+[.,]\d{2}$", next_line):
                 description_parts.append(next_line)
                 j += 1
@@ -770,7 +750,7 @@ def parse_halyk(text: str, lines: List[str]) -> List[Dict]:
         
         full_description = " ".join(description_parts)
         
-        # Now parse the amounts from the collected text
+        # Parse amounts
         amount_match = re.search(
             r"(-?[\d\s,]+[.,]\d{2})\s+KZT\s+([\d\s,]+[.,]\d{2})\s+([\d\s,]+[.,]\d{2})$",
             full_description
@@ -780,8 +760,7 @@ def parse_halyk(text: str, lines: List[str]) -> List[Dict]:
             income = clean_amount(amount_match.group(2))
             expense = clean_amount(amount_match.group(3))
             
-            # Extract operation type and merchant name
-            # Patterns: "Операция оплаты у коммерсанта NAME" or "Поступление перевода" or "Перевод на другую карту"
+            # Extract operation and merchant
             op_match = re.search(
                 r"(Операция оплаты у\s*коммерсанта|Поступление перевода|Перевод на другую карту)\s+(.+?)(?:\s+-?[\d\s,]+[.,]\d{2}\s+KZT|$)",
                 full_description,
@@ -791,12 +770,9 @@ def parse_halyk(text: str, lines: List[str]) -> List[Dict]:
             if op_match:
                 operation_type = op_match.group(1)
                 merchant_raw = op_match.group(2).strip()
-                
-                # Clean merchant name - remove amount and KZT if present
                 merchant_raw = re.sub(r"\s+-?[\d\s,]+[.,]\d{2}.*$", "", merchant_raw)
                 name = clean_name(merchant_raw) if merchant_raw else operation_type
                 
-                # Determine operation
                 if "Поступление перевода" in operation_type:
                     operation = "Пополнение"
                 elif "Перевод на другую карту" in operation_type:
@@ -804,7 +780,6 @@ def parse_halyk(text: str, lines: List[str]) -> List[Dict]:
                 else:
                     operation = "Покупка"
                 
-                # Extract MCC if present
                 mcc = None
                 mcc_match = re.search(r"MCC[:\s]*(\d{4})", full_description)
                 if mcc_match:
@@ -837,16 +812,12 @@ def parse_freedom(text: str, lines: List[str]) -> List[Dict]:
     """Parse Freedom Bank statement"""
     transactions = []
     
-    # Freedom format from PDF:
-    # DD.MM.YYYY -1,234.00 ₸ KZT Операция Детали
-    # Example: 12.01.2026 -2,200.00 ₸ KZT Перевод Перевод с карты на карту
-    
     freedom_pattern = re.compile(
-        r"(\d{2}\.\d{2}\.\d{4})\s+"              # Date
-        r"([+-]?[\d,]+[.,]\d{2})\s*₸?\s*"        # Amount
-        r"(?:KZT|USD|EUR)?\s*"                    # Currency (optional)
-        r"(Пополнение|Перевод|Покупка|Снятие|Платеж|Другое)?\s*"  # Operation
-        r"(.+)?$"                                  # Details
+        r"(\d{2}\.\d{2}\.\d{4})\s+"
+        r"([+-]?[\d,]+[.,]\d{2})\s*₸?\s*"
+        r"(?:KZT|USD|EUR)?\s*"
+        r"(Пополнение|Перевод|Покупка|Снятие|Платеж|Другое)?\s*"
+        r"(.+)?$"
     )
     
     for line in lines:
@@ -878,9 +849,7 @@ def parse_freedom(text: str, lines: List[str]) -> List[Dict]:
                 "description": operation or ("Покупка" if amount < 0 else "Пополнение")
             })
     
-    # Second pass: look for table-style format
     if not transactions:
-        # Look for lines that start with date
         date_pattern = re.compile(r"^(\d{2}\.\d{2}\.\d{4})")
         amount_pattern = re.compile(r"([+-]?[\d,]+[.,]\d{2})\s*₸")
         
@@ -900,12 +869,9 @@ def parse_freedom(text: str, lines: List[str]) -> List[Dict]:
                     if amount == 0:
                         continue
                     
-                    # Get details after amount
                     rest = line[amount_match.end():].strip()
-                    # Remove currency marker
                     rest = re.sub(r"^(KZT|USD|EUR)\s*", "", rest)
                     
-                    # Try to extract operation and details
                     op_match = re.match(r"(Пополнение|Перевод|Покупка|Снятие|Платеж|Другое)\s*(.*)", rest)
                     if op_match:
                         operation = op_match.group(1)
@@ -934,33 +900,25 @@ def parse_centrecredit(text: str, lines: List[str]) -> List[Dict]:
     """Parse CenterCredit (BCC) Bank statement - multi-line format"""
     transactions = []
     
-    # CenterCredit format: dates on one line, description spans multiple lines, amount at end
-    # Pattern: YYYY-MM-DD YYYY-MM-DD Описание ... Amount KZT
-    
     i = 0
     while i < len(lines):
         line = lines[i]
         
-        # Look for line starting with two dates
         date_match = re.match(r"^(\d{4}-\d{2}-\d{2})\s+\d{4}-\d{2}-\d{2}\s+(.+)$", line)
         
         if date_match:
             date_iso = date_match.group(1)
             operation_start = date_match.group(2).strip()
             
-            # Collect the full description and find the amount
             full_desc = operation_start
             amount = None
             
-            # Look ahead for amount (negative or positive with KZT)
             for j in range(i+1, min(i+20, len(lines))):
                 check_line = lines[j]
                 
-                # Check if this is a new transaction (starts with date)
                 if re.match(r"^\d{4}-\d{2}-\d{2}", check_line):
                     break
                 
-                # Look for amount pattern: -70 493.00 or 70 493.00 followed by KZT
                 amt_match = re.search(r"(-?[\d\s]+[.,]\d{2})\s*$", check_line)
                 if amt_match and j+1 < len(lines) and "KZT" in lines[j+1]:
                     amount_str = amt_match.group(1).replace(" ", "").replace(",", ".")
@@ -973,11 +931,9 @@ def parse_centrecredit(text: str, lines: List[str]) -> List[Dict]:
                 full_desc += " " + check_line
             
             if amount is not None and amount != 0:
-                # Convert date from YYYY-MM-DD to DD.MM.YYYY
                 date_parts = date_iso.split("-")
                 date = f"{date_parts[2]}.{date_parts[1]}.{date_parts[0]}"
                 
-                # Determine operation type from description
                 if "Пополнение" in full_desc:
                     operation = "Пополнение"
                     name = "Школа-лицей №48" if "Школа-лицей" in full_desc else clean_name(full_desc)
@@ -1005,26 +961,16 @@ def parse_alatau(text: str, lines: List[str]) -> List[Dict]:
     """Parse Alatau City Bank statement - multi-line format"""
     transactions = []
     
-    # Alatau format is multi-line:
-    # Line 1: DD.MM.YYYY
-    # Line 2: HH:MM:SS
-    # Line 3: Операция Детали
-    # Line 4+: Референс и прочее
-    # Last line: Amount KZT Income Expense
-    
     i = 0
     while i < len(lines):
         line = lines[i]
         
-        # Look for date line
         date_match = re.match(r"^(\d{2}\.\d{2}\.\d{4})$", line.strip())
         if date_match and i + 3 < len(lines):
             date = date_match.group(1)
             
-            # Next line should be time
             time_match = re.match(r"^(\d{2}:\d{2}:\d{2})$", lines[i+1].strip())
             if time_match:
-                # Next line has operation and details
                 op_line = lines[i+2].strip()
                 op_match = re.match(r"^(Покупка|Пополнение|Перевод|Снятие|Комиссия|Прочие)\s+(.+)?$", op_line)
                 
@@ -1032,14 +978,12 @@ def parse_alatau(text: str, lines: List[str]) -> List[Dict]:
                     operation = op_match.group(1)
                     detail = op_match.group(2) or ""
                     
-                    # Find the amount line (contains KZT and two numbers at end)
                     for j in range(i+3, min(i+8, len(lines))):
                         amount_match = re.search(r"([\d\s]+(?:\.\d+)?)\s+KZT\s+(\d+)\s+([\d.]+)$", lines[j])
                         if amount_match:
                             income = clean_amount(amount_match.group(2))
                             expense = clean_amount(amount_match.group(3))
                             
-                            # Clean detail
                             detail = re.sub(r"Референс:.*", "", detail).strip()
                             detail = re.sub(r"Код авторизации:.*", "", detail).strip()
                             name = clean_name(detail) if detail else operation
@@ -1072,37 +1016,28 @@ def parse_forte(text: str, lines: List[str]) -> List[Dict]:
     """Parse Forte Bank statement - format with MCC at end of details"""
     transactions = []
     
-    # Forte format (may span multiple lines):
-    # DD.MM.YYYY -Amount KZT Описание DETAILS, MCC: XXXX
-    # or DD.MM.YYYY Amount KZT Пополнение счета DETAILS
-    
-    # First, join lines that are continuation of previous (don't start with date)
     joined_lines = []
     current_line = ""
     
     for line in lines:
-        # Skip header lines
         if any(skip in line for skip in ["Дата Сумма", "Детализация выписки", "заблокированная сумма"]):
             continue
             
-        # Check if line starts with date pattern
         if re.match(r"^\d{2}\.\d{2}\.\d{4}", line.strip()):
             if current_line:
                 joined_lines.append(current_line)
             current_line = line.strip()
         elif current_line:
-            # Continuation of previous line - join with space
             current_line += " " + line.strip()
     
     if current_line:
         joined_lines.append(current_line)
     
-    # Pattern for Forte transactions
     forte_pattern = re.compile(
-        r"^(\d{2}\.\d{2}\.\d{4})\s+"           # Date
-        r"(-?[\d\s]+[.,]\d{2})\s*KZT\s+"       # Amount
-        r"(Покупка|Пополнение счета|Перевод|Платеж)\s*"  # Operation type
-        r"(.+)$"                                 # Details (including MCC)
+        r"^(\d{2}\.\d{2}\.\d{4})\s+"
+        r"(-?[\d\s]+[.,]\d{2})\s*KZT\s+"
+        r"(Покупка|Пополнение счета|Перевод|Платеж)\s*"
+        r"(.+)$"
     )
     
     for line in joined_lines:
@@ -1118,46 +1053,34 @@ def parse_forte(text: str, lines: List[str]) -> List[Dict]:
             except:
                 continue
             
-            # Skip zero amounts
             if amount == 0:
                 continue
             
-            # Extract MCC from details - handle split MCC like "MCC: 41 21" -> "4121"
             mcc = None
-            # First try normal MCC pattern
             mcc_match = re.search(r"MCC[:\s]*(\d{4})", details)
             if mcc_match:
                 mcc = mcc_match.group(1)
             else:
-                # Try split MCC pattern (e.g., "MCC: 41 21" or "MCC: 5 814")
                 mcc_split = re.search(r"MCC[:\s]*(\d{1,2})\s+(\d{2,3})", details)
                 if mcc_split:
                     mcc = mcc_split.group(1) + mcc_split.group(2)
-                    if len(mcc) == 4:
-                        pass  # Valid MCC
-                    else:
+                    if len(mcc) != 4:
                         mcc = None
             
-            # Remove MCC from details for cleaner name
             details_clean = re.sub(r",?\s*MCC[:\s]*\d+\s*\d*\s*$", "", details).strip()
             
-            # Extract merchant name from details
-            # Format: "MERCHANT,LOCATION,CITY,KZ, Bank Name" or just "MERCHANT"
             name_parts = details_clean.split(",")
             if name_parts:
                 name = name_parts[0].strip()
             else:
                 name = details_clean
             
-            # Handle KASPI_QR_RETAILER - keep it but add MCC category for clarity
             if name == "KASPI_QR_RETAILER" or name.startswith("KASPI_QR"):
-                # Create descriptive name based on MCC
                 mcc_names = {
                     "5411": "Kaspi QR: Продукты",
                     "5412": "Kaspi QR: Продукты",
                     "5812": "Kaspi QR: Ресторан",
                     "5814": "Kaspi QR: Фастфуд",
-                    "5411": "Kaspi QR: Супермаркет",
                     "5533": "Kaspi QR: Автозапчасти",
                     "5641": "Kaspi QR: Одежда",
                     "5732": "Kaspi QR: Электроника",
@@ -1167,15 +1090,13 @@ def parse_forte(text: str, lines: List[str]) -> List[Dict]:
                 }
                 name = mcc_names.get(mcc, f"Kaspi QR ({mcc or 'покупка'})")
             
-            # Handle transfers
             if operation == "Перевод" and "Получатель:" in details:
                 card_match = re.search(r"(\d{6}\*+\d{4})", details)
                 name = f"Перевод {card_match.group(1) if card_match else ''}"
             
-            # Handle bus payments
             if "Avtobys" in details:
                 name = "Avtobys (Проезд)"
-                mcc = mcc or "4111"  # Public transport MCC
+                mcc = mcc or "4111"
             
             if not name or should_ignore(name):
                 continue
@@ -1208,7 +1129,7 @@ async def root():
     return {
         "status": "ok",
         "service": "Multi-Bank Parser API",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "supported_banks": list(PARSERS.keys())
     }
 
@@ -1221,22 +1142,7 @@ async def analyze(
     x_api_key: Optional[str] = Header(None)
 ):
     """
-    Analyze bank statement PDF.
-    
-    - file: PDF file
-    - bank: Bank type (kaspi, halyk, freedom, centrecredit, alatau, forte) or auto-detect
-    - include_charts: "true" to include base64 encoded chart images
-    - x_api_key: API key for authentication
-    
-    Returns full analytics:
-    - bank: detected bank name
-    - summary: totals (expense, income, balance, counts)
-    - transactions: raw transaction list
-    - merchants: expense sources grouped
-    - income_sources: income sources grouped  
-    - categories: expenses by category
-    - daily: daily expense/income breakdown
-    - charts: (optional) monthly and summary charts as base64 PNG
+    Analyze bank statement PDF with debug mode.
     """
     if x_api_key != API_KEY_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -1247,6 +1153,8 @@ async def analyze(
         with open(temp_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         
+        print(f"[Parser] Processing: {file.filename}")
+        
         # Extract text
         text = extract_text(temp_path)
         if not text.strip():
@@ -1254,7 +1162,9 @@ async def analyze(
         
         lines = [l.strip() for l in text.splitlines() if l.strip()]
         
-        # Detect or use specified bank
+        print(f"[Parser] Extracted {len(text)} chars, {len(lines)} lines")
+        
+        # Detect bank
         detected_bank = bank if bank and bank in PARSERS else detect_bank(text)
         print(f"[Parser] Detected bank: {detected_bank}")
         
@@ -1265,6 +1175,37 @@ async def analyze(
         transactions = parser(text, lines)
         
         print(f"[Parser] Found {len(transactions)} transactions")
+        
+        # === DEBUG MODE: Return raw data if no transactions ===
+        if not transactions:
+            return {
+                "bank": detected_bank,
+                "transactions": [],
+                "summary": {
+                    "total_expense": 0,
+                    "total_income": 0,
+                    "balance": 0,
+                    "transaction_count": 0,
+                    "expense_count": 0,
+                    "income_count": 0,
+                },
+                "merchants": [],
+                "expense_sources": [],
+                "income_sources": [],
+                "categories": [],
+                "daily": [],
+                "debug": {
+                    "message": "No transactions found",
+                    "total_chars": len(text),
+                    "total_lines": len(lines),
+                    "first_30_lines": lines[:30],
+                    "contains_halyk": "Halyk" in text or "Народный" in text,
+                    "contains_kaspi": "Kaspi" in text,
+                    "contains_date_pattern": bool(re.search(r"\d{2}\.\d{2}\.\d{4}", text)),
+                    "contains_kzt": "KZT" in text,
+                    "sample_text": text[:1500]
+                }
+            }
         
         # Aggregate and categorize
         analytics = aggregate_transactions(transactions)
@@ -1302,6 +1243,8 @@ async def analyze(
         raise
     except Exception as e:
         print(f"[Parser] Error: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if os.path.exists(temp_path):
@@ -1320,3 +1263,4 @@ async def charts_status():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+

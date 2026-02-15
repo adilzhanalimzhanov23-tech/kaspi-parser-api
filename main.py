@@ -103,43 +103,76 @@ def categorize_transaction(name: str, mcc: Optional[str], description: str) -> s
 # ==================== ПАРСЕРЫ БАНКОВ ====================
 
 def parse_halyk(text: str, lines: List[str]) -> List[Dict]:
-    """Улучшенный парсер Halyk для Finpuls"""
-    transactions = []
-    # Паттерн даты в начале строки 
-    date_row_pattern = re.compile(r"^(\d{2}\.\d{2}\.\d{4})")
-    
-    for line in lines:
-        line = line.strip()
-        match = date_row_pattern.match(line)
-        
-        if match:
-            date = match.group(1)
-            # Извлекаем все числа, похожие на денежные суммы 
-            amounts_raw = re.findall(r"(-?[\d\s\.]+[.,]\d{2})", line)
-            
-            # Чистим строку от дат и KZT для получения названия
-            detail = re.sub(r"\d{2}\.\d{2}\.\d{4}", "", line).replace("KZT", "").strip()
-            
-            if amounts_raw:
-                # В Halyk: [0] - сумма, [1] - приход, [2] - расход 
-                main_sum = clean_amount(amounts_raw[0])
-                income = clean_amount(amounts_raw[1]) if len(amounts_raw) > 1 else 0
-                expense = clean_amount(amounts_raw[-1]) if len(amounts_raw) > 2 else 0
-                
-                final_amount = 0
-                if expense != 0: final_amount = -abs(expense)
-                elif income != 0: final_amount = abs(income)
-                else: final_amount = main_sum
+    """Robust Halyk Bank parser (handles multiline descriptions)"""
 
-                name = clean_name(detail)
-                if final_amount != 0 and "Всего" not in name:
-                    transactions.append({
-                        "date": date,
-                        "amount": final_amount,
-                        "name": name,
-                        "mcc": None,
-                        "description": "Покупка" if final_amount < 0 else "Пополнение"
-                    })
+    transactions = []
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+
+        # 1️⃣ Ищем строку, которая начинается с даты
+        date_match = re.match(r"^(\d{2}\.\d{2}\.\d{4})\s+(\d{2}\.\d{2}\.\d{4})\s+(.+)$", line)
+        if not date_match:
+            i += 1
+            continue
+
+        date = date_match.group(1)
+        description_part = date_match.group(3).strip()
+
+        full_description = description_part
+        amount = None
+        income = 0.0
+        expense = 0.0
+
+        # 2️⃣ Собираем описание до тех пор, пока не найдём сумму
+        j = i + 1
+        while j < len(lines):
+
+            # Если началась новая транзакция — останавливаемся
+            if re.match(r"^\d{2}\.\d{2}\.\d{4}", lines[j]):
+                break
+
+            # Ищем сумму вида -1 625,00 или 2 100,00
+            amount_match = re.search(r"(-?[\d\s]+[.,]\d{2})\s*KZT", lines[j])
+
+            if amount_match:
+                amount_str = amount_match.group(1)
+                amount = clean_amount(amount_str)
+
+                # В Halyk знак суммы уже правильный
+                if amount < 0:
+                    expense = amount
+                else:
+                    income = amount
+
+                break
+
+            # Иначе продолжаем собирать описание
+            full_description += " " + lines[j].strip()
+            j += 1
+
+        # Если сумму нашли — создаём транзакцию
+        if amount and amount != 0:
+            name = full_description
+
+            # Чистим стандартные фразы
+            name = re.sub(r"Операция оплаты у\s*коммерсанта\s*", "", name, flags=re.IGNORECASE)
+            name = re.sub(r"Поступление перевода\s*", "", name, flags=re.IGNORECASE)
+
+            name = clean_name(name)
+
+            if not should_ignore(name):
+                transactions.append({
+                    "date": date,
+                    "amount": amount,
+                    "name": name,
+                    "mcc": None,
+                    "description": "Покупка" if amount < 0 else "Пополнение"
+                })
+
+        i = j if j > i else i + 1
+
     return transactions
 
 def parse_kaspi(text: str, lines: List[str]) -> List[Dict]:
@@ -266,3 +299,4 @@ async def analyze(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
